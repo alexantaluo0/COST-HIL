@@ -122,10 +122,10 @@ class GamepadTeleop(Teleoperator):
         """
         if self.gamepad is None:
             return {
-                TeleopEvents.IS_INTERVENTION: False,
-                TeleopEvents.TERMINATE_EPISODE: False,
-                TeleopEvents.SUCCESS: False,
-                TeleopEvents.RERECORD_EPISODE: False,
+                TeleopEvents.IS_INTERVENTION.value: False,
+                TeleopEvents.TERMINATE_EPISODE.value: False,
+                TeleopEvents.SUCCESS.value: False,
+                TeleopEvents.RERECORD_EPISODE.value: False,
             }
 
         # Update gamepad state to get fresh inputs
@@ -144,10 +144,10 @@ class GamepadTeleop(Teleoperator):
         rerecord_episode = episode_end_status == TeleopEvents.RERECORD_EPISODE
 
         return {
-            TeleopEvents.IS_INTERVENTION: is_intervention,
-            TeleopEvents.TERMINATE_EPISODE: terminate_episode,
-            TeleopEvents.SUCCESS: success,
-            TeleopEvents.RERECORD_EPISODE: rerecord_episode,
+            TeleopEvents.IS_INTERVENTION.value: is_intervention,
+            TeleopEvents.TERMINATE_EPISODE.value: terminate_episode,
+            TeleopEvents.SUCCESS.value: success,
+            TeleopEvents.RERECORD_EPISODE.value: rerecord_episode,
         }
 
     def disconnect(self) -> None:

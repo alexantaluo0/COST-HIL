@@ -251,7 +251,7 @@ class RobotEnv(gym.Env):
         self.episode_data = None
         obs = self._get_observation()
         self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
-        return obs, {TeleopEvents.IS_INTERVENTION: False}
+        return obs, {TeleopEvents.IS_INTERVENTION.value: False}
 
     def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         """Execute one environment step with given action."""
@@ -277,7 +277,7 @@ class RobotEnv(gym.Env):
             reward,
             terminated,
             truncated,
-            {TeleopEvents.IS_INTERVENTION: False},
+            {TeleopEvents.IS_INTERVENTION.value: False},
         )
 
     def render(self) -> None:
@@ -774,7 +774,7 @@ def control_loop(
             episode_idx += 1
 
             if dataset is not None:
-                if transition[TransitionKey.INFO].get(TeleopEvents.RERECORD_EPISODE, False):
+                if transition[TransitionKey.INFO].get(TeleopEvents.RERECORD_EPISODE.value, False):
                     logging.info(f"Re-recording episode {episode_idx}")
                     dataset.clear_episode_buffer()
                     episode_idx -= 1

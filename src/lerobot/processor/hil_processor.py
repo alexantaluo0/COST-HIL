@@ -428,10 +428,10 @@ class InterventionActionProcessorStep(ProcessorStep):
         info = transition.get(TransitionKey.INFO, {})
         complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
         teleop_action = complementary_data.get(TELEOP_ACTION_KEY, {})
-        is_intervention = info.get(TeleopEvents.IS_INTERVENTION, False)
-        terminate_episode = info.get(TeleopEvents.TERMINATE_EPISODE, False)
-        success = info.get(TeleopEvents.SUCCESS, False)
-        rerecord_episode = info.get(TeleopEvents.RERECORD_EPISODE, False)
+        is_intervention = info.get(TeleopEvents.IS_INTERVENTION.value, False)
+        terminate_episode = info.get(TeleopEvents.TERMINATE_EPISODE.value, False)
+        success = info.get(TeleopEvents.SUCCESS.value, False)
+        rerecord_episode = info.get(TeleopEvents.RERECORD_EPISODE.value, False)
 
         new_transition = transition.copy()
 
@@ -462,9 +462,9 @@ class InterventionActionProcessorStep(ProcessorStep):
 
         # Update info with intervention metadata
         info = new_transition.get(TransitionKey.INFO, {})
-        info[TeleopEvents.IS_INTERVENTION] = is_intervention
-        info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
-        info[TeleopEvents.SUCCESS] = success
+        info[TeleopEvents.IS_INTERVENTION.value] = is_intervention
+        info[TeleopEvents.RERECORD_EPISODE.value] = rerecord_episode
+        info[TeleopEvents.SUCCESS.value] = success
         new_transition[TransitionKey.INFO] = info
 
         # Update complementary data with teleop action

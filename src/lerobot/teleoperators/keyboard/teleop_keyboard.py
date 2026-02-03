@@ -251,10 +251,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         """
         if not self.is_connected:
             return {
-                TeleopEvents.IS_INTERVENTION: False,
-                TeleopEvents.TERMINATE_EPISODE: False,
-                TeleopEvents.SUCCESS: False,
-                TeleopEvents.RERECORD_EPISODE: False,
+                TeleopEvents.IS_INTERVENTION.value: False,
+                TeleopEvents.TERMINATE_EPISODE.value: False,
+                TeleopEvents.SUCCESS.value: False,
+                TeleopEvents.RERECORD_EPISODE.value: False,
             }
 
         # Check if any movement keys are currently pressed (indicates intervention)
@@ -288,10 +288,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
                 success = False
 
         return {
-            TeleopEvents.IS_INTERVENTION: is_intervention,
-            TeleopEvents.TERMINATE_EPISODE: terminate_episode,
-            TeleopEvents.SUCCESS: success,
-            TeleopEvents.RERECORD_EPISODE: rerecord_episode,
+            TeleopEvents.IS_INTERVENTION.value: is_intervention,
+            TeleopEvents.TERMINATE_EPISODE.value: terminate_episode,
+            TeleopEvents.SUCCESS.value: success,
+            TeleopEvents.RERECORD_EPISODE.value: rerecord_episode,
         }
 
 
