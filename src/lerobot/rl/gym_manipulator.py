@@ -515,6 +515,7 @@ def step_env_and_process_transition(
     action: torch.Tensor,
     env_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
     action_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
+    force_use_teleop: bool = False,
 ) -> EnvTransition:
     """
     Execute one step with processor pipeline.
@@ -525,10 +526,14 @@ def step_env_and_process_transition(
         action: Action to execute
         env_processor: Environment processor
         action_processor: Action processor
+        force_use_teleop: If True and env supports it, request teleop action (auto intervention)
 
     Returns:
         Processed transition with updated state.
     """
+    # Auto intervention: envs (e.g. gym_hil) may support set_force_intervention
+    if force_use_teleop and hasattr(env, "set_force_intervention"):
+        env.set_force_intervention(True)
 
     # Create action transition
     transition[TransitionKey.ACTION] = action

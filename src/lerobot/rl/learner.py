@@ -100,6 +100,8 @@ from lerobot.utils.utils import (
     init_logging,
 )
 
+from .hypothesis1 import apply_intervention_cost_to_batch
+from .hypothesis2 import compute_batch_weights
 from .learner_service import MAX_WORKERS, SHUTDOWN_TIMEOUT, LearnerService
 
 
@@ -341,6 +343,16 @@ def add_actor_information_and_train(
     if cfg.dataset is not None:
         dataset_repo_id = cfg.dataset.repo_id
 
+    # Hypothesis 1: Intervention cost for reward shaping (separate for ablation)
+    intervention_cost = None
+    if getattr(cfg, "intervention_scheduler", None) and cfg.intervention_scheduler.enabled:
+        intervention_cost = cfg.intervention_scheduler.intervention_cost
+
+    # Hypothesis 2: Weighted intervention for heterogeneous data (separate for ablation)
+    weighted_intervention_config = None
+    if getattr(cfg, "weighted_intervention", None) and cfg.weighted_intervention.enabled:
+        weighted_intervention_config = cfg.weighted_intervention
+
     # Initialize iterators
     online_iterator = None
     offline_iterator = None
@@ -360,6 +372,7 @@ def add_actor_information_and_train(
             device=device,
             dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
+            weighted_intervention_config=weighted_intervention_config,
         )
 
         # Process all available interaction messages sent by the actor server
@@ -400,11 +413,20 @@ def add_actor_information_and_train(
             observations = batch["state"]
             next_observations = batch["next_state"]
             done = batch["done"]
+            # Hypothesis 1: Apply intervention cost to reward when enabled
+            if intervention_cost is not None:
+                apply_intervention_cost_to_batch(batch, intervention_cost)
+                rewards = batch["reward"]
             check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
             observation_features, next_observation_features = get_observation_features(
                 policy=policy, observations=observations, next_observations=next_observations
             )
+
+            # Hypothesis 2: Compute sample weights for weighted loss when enabled
+            sample_weights = None
+            if weighted_intervention_config is not None:
+                sample_weights = compute_batch_weights(batch, weighted_intervention_config, device)
 
             # Create a batch dictionary with all required elements for the forward method
             forward_batch = {
@@ -417,6 +439,8 @@ def add_actor_information_and_train(
                 "next_observation_feature": next_observation_features,
                 "complementary_info": batch["complementary_info"],
             }
+            if sample_weights is not None:
+                forward_batch["sample_weights"] = sample_weights
 
             # Use the forward method for critic loss
             critic_output = policy.forward(forward_batch, model="critic")
@@ -458,12 +482,21 @@ def add_actor_information_and_train(
         observations = batch["state"]
         next_observations = batch["next_state"]
         done = batch["done"]
+        # Hypothesis 1: Apply intervention cost to reward when enabled
+        if intervention_cost is not None:
+            apply_intervention_cost_to_batch(batch, intervention_cost)
+            rewards = batch["reward"]
 
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
         observation_features, next_observation_features = get_observation_features(
             policy=policy, observations=observations, next_observations=next_observations
         )
+
+        # Hypothesis 2: Compute sample weights for weighted loss when enabled
+        sample_weights = None
+        if weighted_intervention_config is not None:
+            sample_weights = compute_batch_weights(batch, weighted_intervention_config, device)
 
         # Create a batch dictionary with all required elements for the forward method
         forward_batch = {
@@ -474,7 +507,10 @@ def add_actor_information_and_train(
             "done": done,
             "observation_feature": observation_features,
             "next_observation_feature": next_observation_features,
+            "complementary_info": batch.get("complementary_info"),
         }
+        if sample_weights is not None:
+            forward_batch["sample_weights"] = sample_weights
 
         critic_output = policy.forward(forward_batch, model="critic")
 
@@ -1127,6 +1163,7 @@ def process_transitions(
     device: str,
     dataset_repo_id: str | None,
     shutdown_event: any,
+    weighted_intervention_config=None,
 ):
     """Process all available transitions from the queue.
 
@@ -1137,6 +1174,7 @@ def process_transitions(
         device: Device to move transitions to
         dataset_repo_id: Repository ID for dataset
         shutdown_event: Event to signal shutdown
+        weighted_intervention_config: Hypothesis 2 config for adding intervention_quality
     """
     while not transition_queue.empty() and not shutdown_event.is_set():
         transition_list = transition_queue.get()
@@ -1170,6 +1208,14 @@ def process_transitions(
                         )
                         action = torch.cat([action, pad], dim=-1)
                     transition[ACTION] = action
+
+            # Hypothesis 2: Add intervention_quality for backward compatibility when enabled
+            if weighted_intervention_config is not None:
+                comp = transition.get("complementary_info") or {}
+                if comp.get("intervention_quality") is None:
+                    comp = dict(comp)
+                    comp["intervention_quality"] = torch.tensor([1.0], device=device)
+                    transition["complementary_info"] = comp
 
             replay_buffer.add(**transition)
 

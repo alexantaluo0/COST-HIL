@@ -277,5 +277,28 @@
                 "add_current_to_observation": false
             }
         }
+    },
+    "intervention_scheduler": {
+        "enabled": true,
+        "uncertainty_threshold_high": 0.5,
+        "uncertainty_threshold_low": 0.1,
+        "min_steps_between_interventions": 10,
+        "intervention_cost": -0.01,
+        "reward_window_size": 20,
+        "baseline_reward_ratio": 0.5,
+        "suppress_when_reward_high": true,
+        "episodic_reward_threshold": 0.5,
+        "episodic_reward_window": 10,
+        "intervention_stop_step": null,
+        "intervention_ramp_down_step": null,
+        "wait_for_intervention_when_suggested": true,
+        "wait_timeout_steps": 300,
+        "show_ui_prompt": true,
+        "use_sound_prompt": false
+    },
+    "weighted_intervention": {
+        "enabled": false,
+        "intervention_quality_key": "intervention_quality",
+        "min_intervention_weight": 0.1
     }
 }

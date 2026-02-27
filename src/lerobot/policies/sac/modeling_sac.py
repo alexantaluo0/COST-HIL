@@ -181,6 +181,7 @@ class SACPolicy(
             next_observations: dict[str, Tensor] = batch["next_state"]
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
+            sample_weights: Tensor | None = batch.get("sample_weights")
 
             loss_critic = self.compute_loss_critic(
                 observations=observations,
@@ -190,6 +191,7 @@ class SACPolicy(
                 done=done,
                 observation_features=observation_features,
                 next_observation_features=next_observation_features,
+                sample_weights=sample_weights,
             )
 
             return {"loss_critic": loss_critic}
@@ -213,10 +215,12 @@ class SACPolicy(
             )
             return {"loss_discrete_critic": loss_discrete_critic}
         if model == "actor":
+            sample_weights: Tensor | None = batch.get("sample_weights")
             return {
                 "loss_actor": self.compute_loss_actor(
                     observations=observations,
                     observation_features=observation_features,
+                    sample_weights=sample_weights,
                 )
             }
 
@@ -264,6 +268,7 @@ class SACPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
+        sample_weights: Tensor | None = None,
     ) -> Tensor:
         with torch.no_grad():
             next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
@@ -306,14 +311,18 @@ class SACPolicy(
         # 4- Calculate loss
         # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
         td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
-        # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
-        critics_loss = (
-            F.mse_loss(
-                input=q_preds,
-                target=td_target_duplicate,
-                reduction="none",
-            ).mean(dim=1)
-        ).sum()
+        mse_per_element = F.mse_loss(
+            input=q_preds,
+            target=td_target_duplicate,
+            reduction="none",
+        )
+        # Hypothesis 2: Weighted loss when sample_weights provided (separate for ablation)
+        if sample_weights is not None:
+            # mse_per_element: (num_critics, batch_size), sample_weights: (batch_size,)
+            w = sample_weights.unsqueeze(0).to(mse_per_element.device)
+            critics_loss = (mse_per_element * w).sum() / (w.sum() * mse_per_element.shape[0] + 1e-8)
+        else:
+            critics_loss = mse_per_element.mean(dim=1).sum()
         return critics_loss
 
     def compute_loss_discrete_critic(
@@ -389,6 +398,7 @@ class SACPolicy(
         self,
         observations,
         observation_features: Tensor | None = None,
+        sample_weights: Tensor | None = None,
     ) -> Tensor:
         actions_pi, log_probs, _ = self.actor(observations, observation_features)
         # Align action dim if needed
@@ -413,7 +423,13 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        actor_loss_per_sample = (self.temperature * log_probs) - min_q_preds
+        # Hypothesis 2: Weighted loss when sample_weights provided (separate for ablation)
+        if sample_weights is not None:
+            w = sample_weights.to(actor_loss_per_sample.device)
+            actor_loss = (actor_loss_per_sample * w).sum() / (w.sum() + 1e-8)
+        else:
+            actor_loss = actor_loss_per_sample.mean()
         return actor_loss
 
     def _init_encoders(self):

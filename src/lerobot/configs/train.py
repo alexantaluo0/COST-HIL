@@ -25,6 +25,11 @@ from huggingface_hub.errors import HfHubHTTPError
 from lerobot import envs
 from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
+from lerobot.configs.hil import (
+    InterventionDebounceConfig,
+    InterventionSchedulerConfig,
+    WeightedInterventionConfig,
+)
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.optim import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
@@ -210,3 +215,9 @@ class TrainRLServerPipelineConfig(TrainPipelineConfig):
     # NOTE: In RL, we don't need an offline dataset
     # TODO: Make `TrainPipelineConfig.dataset` optional
     dataset: DatasetConfig | None = None  # type: ignore[assignment] # because the parent class has made it's type non-optional
+    # Hypothesis 1: Adaptive intervention scheduling (separate for ablation)
+    intervention_scheduler: InterventionSchedulerConfig | None = None
+    # Intervention debounce: fix Space double-trigger and accidental Enter/Backspace
+    intervention_debounce: InterventionDebounceConfig | None = None
+    # Hypothesis 2: Weighted intervention data fusion (separate for ablation)
+    weighted_intervention: WeightedInterventionConfig | None = None
