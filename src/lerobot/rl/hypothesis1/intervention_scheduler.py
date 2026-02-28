@@ -34,8 +34,8 @@ class InterventionScheduler:
     def __init__(self, config: InterventionSchedulerConfig | None = None):
         self.config = config or InterventionSchedulerConfig(enabled=False)
         self._steps_since_last_intervention = 0
-        self._recent_rewards: deque[float] = deque(maxlen=self.config.reward_window_size)
         self._low_uncertainty_streak = 0
+        self._value_ema: float | None = None  # EMA of V(s), auto-initialized on first observation
         use_belief = getattr(self.config, "use_belief_uncertainty", False)
         self._belief_state = (
             BeliefState(
@@ -47,9 +47,8 @@ class InterventionScheduler:
         )
 
     def reset(self) -> None:
-        """Reset episode-level state."""
+        """Reset episode-level state. Keeps _value_ema across episodes for stable baseline."""
         self._steps_since_last_intervention = 0
-        self._recent_rewards.clear()
         self._low_uncertainty_streak = 0
         if self._belief_state is not None:
             self._belief_state.reset()
@@ -57,26 +56,21 @@ class InterventionScheduler:
     def should_suggest_intervention(
         self,
         uncertainty_score: float,
-        reward: float,
         is_human_intervention: bool,
         value_estimate: float | None = None,
         interaction_step: int = 0,
     ) -> bool:
-        """Decide whether to suggest intervention (for display or auto-mode).
+        """Decide whether to suggest intervention.
 
-        Two modes:
+        Trigger modes:
         - Value-based (optimal stopping): benefit = uncertainty * max(0, V_goal - V) > |cost|
-        - Heuristic: high uncertainty + recent_return < baseline
-
-        Stage-aware suppression: when policy converged (high recent reward) or past stop_step,
-        do not suggest intervention.
+        - Heuristic: uncertainty_score >= adaptive threshold (linear ramp over training)
 
         Args:
             uncertainty_score: From uncertainty_estimator, in [0, 1]
-            reward: Reward from last step
             is_human_intervention: Whether human already intervened this step
             value_estimate: E[V_no_intervene] = Q(s,π(s)) when use_value_based_trigger
-            interaction_step: Global interaction step for stage-aware suppression
+            interaction_step: Global interaction step for adaptive threshold
 
         Returns:
             True if intervention is suggested
@@ -89,7 +83,6 @@ class InterventionScheduler:
             self._belief_state.update(uncertainty_score)
             uncertainty_score = self._belief_state.get_belief_uncertainty()
 
-        self._recent_rewards.append(reward)
         self._steps_since_last_intervention += 1
 
         if is_human_intervention:
@@ -109,24 +102,15 @@ class InterventionScheduler:
         else:
             self._low_uncertainty_streak = 0
 
-        # Value-based trigger (optimal stopping): E[benefit] > |cost|
-        use_value = getattr(self.config, "use_value_based_trigger", False)
-        if use_value and value_estimate is not None:
-            cost = getattr(self.config, "intervention_cost", -0.01)
-            cost_abs = abs(cost)
-            value_goal = getattr(self.config, "value_goal", 1.0)
-            benefit = uncertainty_score * max(0.0, value_goal - value_estimate)
-            if benefit > cost_abs:
-                logger.info(
-                    "[ACTOR] Intervention suggested (value-based): benefit=%.4f > cost=%.4f, V=%.3f",
-                    benefit,
-                    cost_abs,
-                    value_estimate,
-                )
-                return True
-            return False
+        # Update V(s) EMA for adaptive benefit baseline
+        value_ema_alpha = getattr(self.config, "value_ema_alpha", 0.05)
+        if value_estimate is not None:
+            if self._value_ema is None:
+                self._value_ema = value_estimate
+            else:
+                self._value_ema = (1 - value_ema_alpha) * self._value_ema + value_ema_alpha * value_estimate
 
-        # Heuristic trigger: high uncertainty + below-baseline recent return
+        # Heuristic trigger: uncertainty >= adaptive threshold
         # Adaptive threshold: linear ramp from start to end over ramp_end_step
         ramp_end = getattr(self.config, "uncertainty_threshold_ramp_end_step", None)
         if ramp_end is not None and ramp_end > 0:
@@ -139,17 +123,22 @@ class InterventionScheduler:
         if uncertainty_score < effective_threshold:
             return False
 
-        if len(self._recent_rewards) < self.config.reward_window_size // 2:
-            return False
-
-        recent_return = sum(self._recent_rewards) / len(self._recent_rewards)
-        if recent_return >= self.config.baseline_reward_ratio:
-            return False
+        # Value-based benefit gate: benefit = σ × max(0, V_ema - V(s))
+        # Only intervene if benefit > |intervention_cost| (optimal stopping condition)
+        cost_abs = abs(getattr(self.config, "intervention_cost", 0.0))
+        if value_estimate is not None and self._value_ema is not None:
+            benefit = uncertainty_score * max(0.0, self._value_ema - value_estimate)
+            v_ema_str = f", V(s)={value_estimate:.3f}, V_ema={self._value_ema:.3f}, benefit={benefit:.3f}"
+            if cost_abs > 0.0 and benefit <= cost_abs:
+                return False
+        else:
+            benefit = None
+            v_ema_str = ""
 
         logger.info(
-            "[ACTOR] Intervention suggested: uncertainty=%.3f, recent_return=%.3f (baseline=%.2f)",
+            "[ACTOR] Intervention suggested: uncertainty=%.3f (threshold=%.2f)%s",
             uncertainty_score,
-            recent_return,
-            self.config.baseline_reward_ratio,
+            effective_threshold,
+            v_ema_str,
         )
         return True

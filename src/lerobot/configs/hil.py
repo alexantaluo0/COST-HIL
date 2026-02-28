@@ -17,13 +17,11 @@ class InterventionSchedulerConfig:
     uncertainty_threshold_ramp_end_step: int | None = None  # Step to reach end; None = use fixed uncertainty_threshold_high
     uncertainty_threshold_low: float = 0.1
     min_steps_between_interventions: int = 10
-    # Penalty per intervention step: negative value (e.g. -0.01) reduces reward
-    intervention_cost: float = -0.01
-    reward_window_size: int = 20
-    baseline_reward_ratio: float = 0.5
-    # Value-based trigger (optimal stopping): use Q(s,π(s)) for benefit > cost
-    use_value_based_trigger: bool = False
-    value_goal: float = 1.0  # Success return for benefit = uncertainty * max(0, goal - V)
+    # Value-based benefit: benefit = σ × max(0, V_ema - V(s)), where V_ema is running mean of Q values
+    value_ema_alpha: float = 0.05  # EMA smoothing for V(s) baseline (slow to track long-term trend)
+    # Optimal stopping cost: intervene only when benefit > |intervention_cost|
+    # Set to 0.0 to disable (trigger on uncertainty threshold alone)
+    intervention_cost: float = 0.0
     # Belief state: EMA of uncertainty as Bayesian-style posterior proxy
     use_belief_uncertainty: bool = False
     belief_ema_alpha: float = 0.9

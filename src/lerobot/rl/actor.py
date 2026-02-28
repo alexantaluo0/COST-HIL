@@ -288,9 +288,8 @@ def act_with_policy(
         intervention_scheduler = InterventionScheduler(config=cfg.intervention_scheduler)
         sc = cfg.intervention_scheduler
         logging.info(
-            "[ACTOR] Intervention scheduler enabled (uncertainty_threshold=%.2f, baseline=%.2f, show_ui=%s)",
+            "[ACTOR] Intervention scheduler enabled (uncertainty_threshold=%.2f, show_ui=%s)",
             sc.uncertainty_threshold_high,
-            sc.baseline_reward_ratio,
             getattr(sc, "show_ui_prompt", True),
         )
         intervention_ui_prompt = InterventionUIPrompt(
@@ -392,12 +391,9 @@ def act_with_policy(
             suggested_intervention = False
             if intervention_scheduler is not None and not waiting_for_intervention:
                 uncertainty_score = estimate_actor_entropy_uncertainty(policy, observation)
-                value_estimate = None
-                if getattr(cfg.intervention_scheduler, "use_value_based_trigger", False):
-                    value_estimate = estimate_value_no_intervention(policy, observation)
+                value_estimate = estimate_value_no_intervention(policy, observation)
                 suggested_intervention = intervention_scheduler.should_suggest_intervention(
                     uncertainty_score=uncertainty_score,
-                    reward=float(reward),
                     is_human_intervention=is_intervention,
                     value_estimate=value_estimate,
                     interaction_step=interaction_step,
