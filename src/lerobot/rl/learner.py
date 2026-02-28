@@ -100,7 +100,6 @@ from lerobot.utils.utils import (
     init_logging,
 )
 
-from .hypothesis1 import apply_intervention_cost_to_batch
 from .hypothesis2 import compute_batch_weights
 from .learner_service import MAX_WORKERS, SHUTDOWN_TIMEOUT, LearnerService
 
@@ -343,11 +342,6 @@ def add_actor_information_and_train(
     if cfg.dataset is not None:
         dataset_repo_id = cfg.dataset.repo_id
 
-    # Hypothesis 1: Intervention cost for reward shaping (separate for ablation)
-    intervention_cost = None
-    if getattr(cfg, "intervention_scheduler", None) and cfg.intervention_scheduler.enabled:
-        intervention_cost = cfg.intervention_scheduler.intervention_cost
-
     # Hypothesis 2: Weighted intervention for heterogeneous data (separate for ablation)
     weighted_intervention_config = None
     if getattr(cfg, "weighted_intervention", None) and cfg.weighted_intervention.enabled:
@@ -413,10 +407,6 @@ def add_actor_information_and_train(
             observations = batch["state"]
             next_observations = batch["next_state"]
             done = batch["done"]
-            # Hypothesis 1: Apply intervention cost to reward when enabled
-            if intervention_cost is not None:
-                apply_intervention_cost_to_batch(batch, intervention_cost)
-                rewards = batch["reward"]
             check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
             observation_features, next_observation_features = get_observation_features(
@@ -482,11 +472,6 @@ def add_actor_information_and_train(
         observations = batch["state"]
         next_observations = batch["next_state"]
         done = batch["done"]
-        # Hypothesis 1: Apply intervention cost to reward when enabled
-        if intervention_cost is not None:
-            apply_intervention_cost_to_batch(batch, intervention_cost)
-            rewards = batch["reward"]
-
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
         observation_features, next_observation_features = get_observation_features(

@@ -36,8 +36,6 @@ class InterventionScheduler:
         self._steps_since_last_intervention = 0
         self._recent_rewards: deque[float] = deque(maxlen=self.config.reward_window_size)
         self._low_uncertainty_streak = 0
-        ep_window = getattr(self.config, "episodic_reward_window", 10)
-        self._recent_episodic_rewards: deque[float] = deque(maxlen=ep_window)
         use_belief = getattr(self.config, "use_belief_uncertainty", False)
         self._belief_state = (
             BeliefState(
@@ -49,16 +47,12 @@ class InterventionScheduler:
         )
 
     def reset(self) -> None:
-        """Reset episode-level state. Keeps _recent_episodic_rewards across episodes."""
+        """Reset episode-level state."""
         self._steps_since_last_intervention = 0
         self._recent_rewards.clear()
         self._low_uncertainty_streak = 0
         if self._belief_state is not None:
             self._belief_state.reset()
-
-    def on_episode_end(self, episodic_reward: float) -> None:
-        """Record episodic reward for stage-aware suppression. Called before reset()."""
-        self._recent_episodic_rewards.append(episodic_reward)
 
     def should_suggest_intervention(
         self,
@@ -88,20 +82,6 @@ class InterventionScheduler:
             True if intervention is suggested
         """
         if not self.config.enabled:
-            return False
-
-        # Stage suppression 1: recent episodic rewards high -> policy converged
-        suppress_reward = getattr(self.config, "suppress_when_reward_high", False)
-        ep_window = getattr(self.config, "episodic_reward_window", 10)
-        ep_threshold = getattr(self.config, "episodic_reward_threshold", 0.9)
-        if suppress_reward and len(self._recent_episodic_rewards) >= ep_window:
-            mean_reward = sum(self._recent_episodic_rewards) / len(self._recent_episodic_rewards)
-            if mean_reward >= ep_threshold:
-                return False
-
-        # Stage suppression 2: past stop step
-        stop_step = getattr(self.config, "intervention_stop_step", None)
-        if stop_step is not None and interaction_step >= stop_step:
             return False
 
         # Belief update: use EMA of uncertainty when enabled
@@ -147,7 +127,16 @@ class InterventionScheduler:
             return False
 
         # Heuristic trigger: high uncertainty + below-baseline recent return
-        if uncertainty_score < self.config.uncertainty_threshold_high:
+        # Adaptive threshold: linear ramp from start to end over ramp_end_step
+        ramp_end = getattr(self.config, "uncertainty_threshold_ramp_end_step", None)
+        if ramp_end is not None and ramp_end > 0:
+            start = getattr(self.config, "uncertainty_threshold_high_start", 0.2)
+            end = getattr(self.config, "uncertainty_threshold_high_end", 0.7)
+            t = min(1.0, interaction_step / ramp_end)
+            effective_threshold = start + t * (end - start)
+        else:
+            effective_threshold = self.config.uncertainty_threshold_high
+        if uncertainty_score < effective_threshold:
             return False
 
         if len(self._recent_rewards) < self.config.reward_window_size // 2:

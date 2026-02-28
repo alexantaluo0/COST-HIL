@@ -103,6 +103,7 @@ from .hypothesis1 import (
     estimate_value_no_intervention,
 )
 
+
 # Main entry point
 
 
@@ -302,9 +303,18 @@ def act_with_policy(
     # Auto intervention: use previous step's suggestion for next step
     suggested_intervention_prev = False
     auto_intervention_steps = 0
+    is_intervention = False  # from prev step; used for force_use_teleop
     sc = getattr(cfg, "intervention_scheduler", None)
     use_auto = getattr(sc, "use_auto_intervention", False) if (sc and sc.enabled) else False
     max_auto_steps = getattr(sc, "max_auto_intervention_steps", 50) if sc else 50
+    wait_for_intervention = getattr(sc, "wait_for_intervention_when_suggested", False) if (sc and sc.enabled) else False
+
+    # Zero action for wait mode (actor pauses, env keeps stepping until Space or timeout)
+    action_space = getattr(online_env, "action_space", None)
+    if action_space is not None and hasattr(action_space, "shape") and len(action_space.shape) > 0:
+        zero_action = torch.zeros(action_space.shape[0], dtype=torch.float32, device=device)
+    else:
+        zero_action = None  # fallback: will use policy action shape when first created
 
     try:
         for interaction_step in range(cfg.policy.online_steps):
@@ -317,19 +327,31 @@ def act_with_policy(
                 k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in cfg.policy.input_features
             }
 
-            # Time policy inference and check if it meets FPS requirement
-            with policy_timer:
-                # Extract observation from transition for policy
-                action = policy.select_action(batch=observation)
-            policy_fps = policy_timer.fps_last
+            # Wait mode: UI prompt appeared, actor pauses until user presses Space or episode ends.
+            # If user never presses Space, episode timeout will reset. If user presses Space, use teleop.
+            waiting_for_intervention = (
+                wait_for_intervention and suggested_intervention_prev and not is_intervention
+            )
 
-            log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
+            if waiting_for_intervention:
+                # Actor paused: use zero action (hold), no policy inference
+                action = zero_action if zero_action is not None else torch.zeros(4, dtype=torch.float32, device=device)
+                force_use_teleop = False
+            else:
+                # Normal: policy inference
+                with policy_timer:
+                    action = policy.select_action(batch=observation)
+                policy_fps = policy_timer.fps_last
+                log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
-            # Auto intervention: force teleop when suggested (with safety limit)
-            force_use_teleop = False
-            if use_auto and suggested_intervention_prev and auto_intervention_steps < max_auto_steps:
-                force_use_teleop = True
-                auto_intervention_steps += 1
+                # Human intervention: user pressed Space -> teleop (unified path).
+                # Manual Space (no prompt) and UI-prompted Space both use same teleop flow.
+                force_use_teleop = False
+                if is_intervention:
+                    force_use_teleop = True
+                elif use_auto and suggested_intervention_prev and auto_intervention_steps < max_auto_steps:
+                    force_use_teleop = True
+                    auto_intervention_steps += 1
 
             # Use the new step function
             new_transition = step_env_and_process_transition(
@@ -366,9 +388,9 @@ def act_with_policy(
                 episode_intervention = True
                 episode_intervention_steps += 1
 
-            # Hypothesis 1: Compute suggested_intervention for logging/ablation (does not override human)
+            # Hypothesis 1: Compute suggested_intervention (skip when waiting - no policy run)
             suggested_intervention = False
-            if intervention_scheduler is not None:
+            if intervention_scheduler is not None and not waiting_for_intervention:
                 uncertainty_score = estimate_actor_entropy_uncertainty(policy, observation)
                 value_estimate = None
                 if getattr(cfg.intervention_scheduler, "use_value_based_trigger", False):
@@ -389,91 +411,17 @@ def act_with_policy(
             }
             if intervention_scheduler is not None:
                 complementary_info["suggested_intervention"] = suggested_intervention
-            # Hypothesis 1: UI prompt when suggested_intervention
+            # Hypothesis 1: UI prompt when suggested_intervention (prompts user to press Space)
             if intervention_ui_prompt is not None:
-                intervention_ui_prompt.update(suggested_intervention)
+                intervention_ui_prompt.update(suggested_intervention if not waiting_for_intervention else True)
 
-            # Hypothesis 1: Wait for human intervention when suggested (block until space pressed)
-            wait_for_intervention = getattr(sc, "wait_for_intervention_when_suggested", False) if sc else False
-            wait_timeout = getattr(sc, "wait_timeout_steps", 300) if sc else 300
-            if (
-                wait_for_intervention
-                and suggested_intervention
-                and not is_intervention
-                and intervention_scheduler is not None
-            ):
-                hold_action = torch.zeros_like(action, device=action.device, dtype=action.dtype)
-                wait_step = 0
-                while wait_step < wait_timeout:
-                    if shutdown_event.is_set():
-                        break
-                    state_before_step = {
-                        k: v
-                        for k, v in new_transition[TransitionKey.OBSERVATION].items()
-                        if k in cfg.policy.input_features
-                    }
-                    wait_transition = step_env_and_process_transition(
-                        env=online_env,
-                        transition=new_transition,
-                        action=hold_action,
-                        env_processor=env_processor,
-                        action_processor=action_processor,
-                        force_use_teleop=False,
-                    )
-                    wait_step += 1
-                    wait_is_intervention = wait_transition[TransitionKey.INFO].get(
-                        TeleopEvents.IS_INTERVENTION.value, False
-                    )
-                    if wait_is_intervention:
-                        new_transition = wait_transition
-                        next_observation = {
-                            k: v
-                            for k, v in new_transition[TransitionKey.OBSERVATION].items()
-                            if k in cfg.policy.input_features
-                        }
-                        executed_action = new_transition[TransitionKey.COMPLEMENTARY_DATA]["teleop_action"]
-                        reward = new_transition[TransitionKey.REWARD]
-                        # Human just took control: do NOT end episode yet - let them operate until
-                        # (1) object at target height, (2) time limit, or (3) box out of bounds
-                        done = False
-                        truncated = False
-                        sum_reward_episode += float(reward)
-                        episode_total_steps += 1
-                        is_intervention = True
-                        episode_intervention = True
-                        episode_intervention_steps += 1
-                        complementary_info = {
-                            "discrete_penalty": torch.tensor(
-                                [new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)]
-                            ),
-                            TeleopEvents.IS_INTERVENTION.value: True,
-                            "suggested_intervention": suggested_intervention,
-                        }
-                        if getattr(cfg, "weighted_intervention", None) and cfg.weighted_intervention.enabled:
-                            complementary_info["intervention_quality"] = torch.tensor([1.0])
-                        list_transition_to_send_to_learner.append(
-                            Transition(
-                                state=state_before_step,
-                                action=executed_action,
-                                reward=reward,
-                                next_state=next_observation,
-                                done=done,
-                                truncated=truncated,
-                                complementary_info=complementary_info,
-                            )
-                        )
-                        observation = next_observation
-                        logging.info("[ACTOR] Human intervention received after %d wait steps", wait_step)
-                        break
-                    new_transition = wait_transition
-                    if intervention_ui_prompt is not None:
-                        intervention_ui_prompt.update(True)
-                else:
-                    if wait_step >= wait_timeout:
-                        logging.warning("[ACTOR] Wait for intervention timed out after %d steps", wait_timeout)
-
-            # Carry suggested_intervention for next step (auto intervention)
-            suggested_intervention_prev = suggested_intervention
+            # Carry suggested_intervention for next step
+            if waiting_for_intervention:
+                if is_intervention:
+                    suggested_intervention_prev = False  # User pressed Space, exit wait
+                # else: keep suggested_intervention_prev True (still waiting)
+            else:
+                suggested_intervention_prev = suggested_intervention
             if is_intervention:
                 auto_intervention_steps = 0  # Reset on human intervention
 
@@ -481,18 +429,19 @@ def act_with_policy(
             if getattr(cfg, "weighted_intervention", None) and cfg.weighted_intervention.enabled:
                 complementary_info["intervention_quality"] = torch.tensor([1.0])
 
-            # Create transition for learner (convert to old format)
-            list_transition_to_send_to_learner.append(
-                Transition(
-                    state=observation,
-                    action=executed_action,
-                    reward=reward,
-                    next_state=next_observation,
-                    done=done,
-                    truncated=truncated,
-                    complementary_info=complementary_info,
+            # Create transition for learner (skip when waiting - those steps use zero action, not policy)
+            if not waiting_for_intervention:
+                list_transition_to_send_to_learner.append(
+                    Transition(
+                        state=observation,
+                        action=executed_action,
+                        reward=reward,
+                        next_state=next_observation,
+                        done=done,
+                        truncated=truncated,
+                        complementary_info=complementary_info,
+                    )
                 )
-            )
 
             # Update transition for next iteration
             transition = new_transition
@@ -531,8 +480,6 @@ def act_with_policy(
                 )
 
                 # Reset intervention counters and environment
-                if intervention_scheduler is not None:
-                    intervention_scheduler.on_episode_end(sum_reward_episode)
                 sum_reward_episode = 0.0
                 episode_intervention = False
                 episode_intervention_steps = 0

@@ -11,6 +11,10 @@ class InterventionSchedulerConfig:
 
     enabled: bool = False
     uncertainty_threshold_high: float = 0.5
+    # Adaptive uncertainty_threshold_high: linear ramp from start to end
+    uncertainty_threshold_high_start: float = 0.2  # Early training
+    uncertainty_threshold_high_end: float = 0.7  # Late training
+    uncertainty_threshold_ramp_end_step: int | None = None  # Step to reach end; None = use fixed uncertainty_threshold_high
     uncertainty_threshold_low: float = 0.1
     min_steps_between_interventions: int = 10
     # Penalty per intervention step: negative value (e.g. -0.01) reduces reward
@@ -28,16 +32,9 @@ class InterventionSchedulerConfig:
     max_auto_intervention_steps: int = 50  # Safety: max consecutive auto-intervention steps
     # When suggested, block until human presses intervention key (space) before continuing
     wait_for_intervention_when_suggested: bool = False
-    wait_timeout_steps: int = 300  # Max steps to wait (e.g. 30s at 10 FPS)
     # UI prompt when suggested_intervention is True
     show_ui_prompt: bool = True
     use_sound_prompt: bool = False
-    # Training stage adaptive: suppress intervention when policy converged
-    suppress_when_reward_high: bool = True
-    episodic_reward_threshold: float = 0.9
-    episodic_reward_window: int = 10
-    intervention_stop_step: int | None = None
-    intervention_ramp_down_step: int | None = None
 
 
 @dataclass
