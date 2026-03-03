@@ -286,7 +286,7 @@ def add_actor_information_and_train(
     log_freq = cfg.log_freq
     save_freq = cfg.save_freq
     policy_update_freq = cfg.policy.policy_update_freq
-    policy_parameters_push_frequency = cfg.policy.actor_learner_config.policy_parameters_push_frequency
+    steps_per_update = cfg.policy.actor_learner_config.steps_per_update
     saving_checkpoint = cfg.save_checkpoint
     online_steps = cfg.policy.online_steps
     async_prefetch = cfg.policy.async_prefetch
@@ -312,8 +312,6 @@ def add_actor_information_and_train(
 
     push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
 
-    last_time_policy_pushed = time.time()
-
     optimizers, lr_scheduler = make_optimizers_and_scheduler(cfg=cfg, policy=policy)
 
     # If we are resuming, we need to load the training state
@@ -323,15 +321,24 @@ def add_actor_information_and_train(
 
     replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
     batch_size = cfg.batch_size
-    offline_replay_buffer = None
-
+    # Align with official HIL-SERL: always maintain intervention_buffer for 50/50 RLPD sampling
+    intervention_buffer = None
     if cfg.dataset is not None:
-        offline_replay_buffer = initialize_offline_replay_buffer(
+        intervention_buffer = initialize_offline_replay_buffer(
             cfg=cfg,
             device=device,
             storage_device=storage_device,
         )
-        batch_size: int = batch_size // 2  # We will sample from both replay buffer
+    else:
+        # No pre-recorded demo: create empty buffer for online intervention data only
+        intervention_buffer = ReplayBuffer(
+            capacity=cfg.policy.offline_buffer_capacity,
+            device=device,
+            state_keys=cfg.policy.input_features.keys(),
+            storage_device=storage_device,
+            optimize_memory=True,
+        )
+    batch_size = batch_size // 2  # 50/50 sampling: half from online, half from intervention (official RLPD)
 
     logging.info("Starting learner thread")
     interaction_message = None
@@ -349,7 +356,7 @@ def add_actor_information_and_train(
 
     # Initialize iterators
     online_iterator = None
-    offline_iterator = None
+    intervention_iterator = None
 
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
     while True:
@@ -362,9 +369,8 @@ def add_actor_information_and_train(
         process_transitions(
             transition_queue=transition_queue,
             replay_buffer=replay_buffer,
-            offline_replay_buffer=offline_replay_buffer,
+            intervention_buffer=intervention_buffer,
             device=device,
-            dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
             weighted_intervention_config=weighted_intervention_config,
         )
@@ -386,20 +392,24 @@ def add_actor_information_and_train(
                 batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
             )
 
-        if offline_replay_buffer is not None and offline_iterator is None:
-            offline_iterator = offline_replay_buffer.get_iterator(
+        if intervention_buffer is not None and intervention_iterator is None and len(intervention_buffer) >= batch_size:
+            intervention_iterator = intervention_buffer.get_iterator(
                 batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
             )
 
         time_for_one_optimization_step = time.time()
         for _ in range(utd_ratio - 1):
-            # Sample from the iterators
+            # Sample from the iterators (50/50: online + intervention, per official RLPD)
             batch = next(online_iterator)
-
-            if dataset_repo_id is not None:
-                batch_offline = next(offline_iterator)
+            if intervention_iterator is not None:
+                batch_intervention = next(intervention_iterator)
                 batch = concatenate_batch_transitions(
-                    left_batch_transitions=batch, right_batch_transition=batch_offline
+                    left_batch_transitions=batch, right_batch_transition=batch_intervention
+                )
+            else:
+                batch_online2 = next(online_iterator)
+                batch = concatenate_batch_transitions(
+                    left_batch_transitions=batch, right_batch_transition=batch_online2
                 )
 
             actions = batch[ACTION]
@@ -460,11 +470,15 @@ def add_actor_information_and_train(
 
         # Sample for the last update in the UTD ratio
         batch = next(online_iterator)
-
-        if dataset_repo_id is not None:
-            batch_offline = next(offline_iterator)
+        if intervention_iterator is not None:
+            batch_intervention = next(intervention_iterator)
             batch = concatenate_batch_transitions(
-                left_batch_transitions=batch, right_batch_transition=batch_offline
+                left_batch_transitions=batch, right_batch_transition=batch_intervention
+            )
+        else:
+            batch_online2 = next(online_iterator)
+            batch = concatenate_batch_transitions(
+                left_batch_transitions=batch, right_batch_transition=batch_online2
             )
 
         actions = batch[ACTION]
@@ -563,10 +577,9 @@ def add_actor_information_and_train(
                 # Update temperature
                 policy.update_temperature()
 
-        # Push policy to actors if needed
-        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
+        # Push policy to actors if needed (align with official HIL-SERL: every steps_per_update steps)
+        if optimization_step > 0 and optimization_step % steps_per_update == 0:
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
-            last_time_policy_pushed = time.time()
 
         # Update target networks (main and discrete)
         policy.update_target_networks()
@@ -574,8 +587,8 @@ def add_actor_information_and_train(
         # Log training metrics at specified intervals
         if optimization_step % log_freq == 0:
             training_infos["replay_buffer_size"] = len(replay_buffer)
-            if offline_replay_buffer is not None:
-                training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)
+            if intervention_buffer is not None:
+                training_infos["offline_buffer_size"] = len(intervention_buffer)
             training_infos["Optimization step"] = optimization_step
 
             # Log training metrics
@@ -613,7 +626,7 @@ def add_actor_information_and_train(
                 policy=policy,
                 optimizers=optimizers,
                 replay_buffer=replay_buffer,
-                offline_replay_buffer=offline_replay_buffer,
+                intervention_buffer=intervention_buffer,
                 dataset_repo_id=dataset_repo_id,
                 fps=fps,
             )
@@ -697,7 +710,7 @@ def save_training_checkpoint(
     policy: nn.Module,
     optimizers: dict[str, Optimizer],
     replay_buffer: ReplayBuffer,
-    offline_replay_buffer: ReplayBuffer | None = None,
+    intervention_buffer: ReplayBuffer | None = None,
     dataset_repo_id: str | None = None,
     fps: int = 30,
 ) -> None:
@@ -762,12 +775,12 @@ def save_training_checkpoint(
     repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
     replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
 
-    if offline_replay_buffer is not None:
+    if intervention_buffer is not None:
         dataset_offline_dir = os.path.join(cfg.output_dir, "dataset_offline")
         if os.path.exists(dataset_offline_dir) and os.path.isdir(dataset_offline_dir):
             shutil.rmtree(dataset_offline_dir)
 
-        offline_replay_buffer.to_lerobot_dataset(
+        intervention_buffer.to_lerobot_dataset(
             cfg.dataset.repo_id,
             fps=fps,
             root=dataset_offline_dir,
@@ -1144,9 +1157,8 @@ def process_interaction_message(
 def process_transitions(
     transition_queue: Queue,
     replay_buffer: ReplayBuffer,
-    offline_replay_buffer: ReplayBuffer,
+    intervention_buffer: ReplayBuffer | None,
     device: str,
-    dataset_repo_id: str | None,
     shutdown_event: any,
     weighted_intervention_config=None,
 ):
@@ -1155,9 +1167,8 @@ def process_transitions(
     Args:
         transition_queue: Queue for receiving transitions from the actor
         replay_buffer: Replay buffer to add transitions to
-        offline_replay_buffer: Offline replay buffer to add transitions to
+        intervention_buffer: Intervention buffer for 50/50 RLPD sampling (add intervention transitions)
         device: Device to move transitions to
-        dataset_repo_id: Repository ID for dataset
         shutdown_event: Event to signal shutdown
         weighted_intervention_config: Hypothesis 2 config for adding intervention_quality
     """
@@ -1204,16 +1215,15 @@ def process_transitions(
 
             replay_buffer.add(**transition)
 
-            # Add to offline buffer if it's an intervention
-            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
+            # Add to intervention buffer if it's an intervention (align with official HIL-SERL: always)
+            if intervention_buffer is not None and transition.get("complementary_info", {}).get(
                 TeleopEvents.IS_INTERVENTION.value, False
             ):
-                offline_replay_buffer.add(**transition)
-                logging.info(
-                    f"[LEARNER] Intervention detected! Added to offline buffer. "
-                    f"Offline buffer size: {len(offline_replay_buffer)}/{offline_replay_buffer.capacity}"
-                )
-
+                intervention_buffer.add(**transition)
+                # logging.info(
+                #     f"[LEARNER] Intervention detected! Added to intervention buffer. "
+                #     f"Intervention buffer size: {len(intervention_buffer)}/{intervention_buffer.capacity}"
+                # )
 
 def process_interaction_messages(
     interaction_message_queue: Queue,

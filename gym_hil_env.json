@@ -50,9 +50,9 @@
         }
     },
     "dataset": {
-        "repo_id": "alexanta/sim_keyboard_dataset2",
+        "repo_id": "alexanta/sim_keyboard_dataset3",
         "task": "PandaPickCubeKeyboard-v0",
-        "root": "E:/HIL-SERL/datasets/sim_keyboard_dataset_0115_ID2",
+        "root": "E:/HIL-SERL/datasets/sim_keyboard_dataset_0303_ID1",
         "num_episodes_to_record": 30,
         "replay_episode": null,
         "push_to_hub": true

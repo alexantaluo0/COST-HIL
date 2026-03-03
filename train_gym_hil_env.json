@@ -18,14 +18,14 @@
         "mode": "offline"
     },
     "dataset": {
-        "repo_id": "alexanta/sim_keyboard_dataset1",
-        "root": "E:/HIL-SERL/datasets/sim_keyboard_dataset_0115_ID2",
+        "repo_id": "alexanta/sim_keyboard_dataset3",
+        "root": "E:/HIL-SERL/datasets/sim_keyboard_dataset_0303_ID1",
         "use_imagenet_stats": false
     },
     "policy": {
         "type": "sac",
         "n_obs_steps": 1,
-        "repo_id": "alexanta/policy_panda_pick_keyboard_0115_ID2",
+        "repo_id": "alexanta/policy_panda_pick_keyboard_0303_ID1",
         "normalization_mapping": {
             "VISUAL": "MEAN_STD",
             "STATE": "MIN_MAX",
@@ -184,6 +184,7 @@
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
             "learner_port": 50051,
+            "steps_per_update": 50,
             "policy_parameters_push_frequency": 4
         },
         "concurrency": {

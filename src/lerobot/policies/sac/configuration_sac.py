@@ -51,6 +51,9 @@ class ConcurrencyConfig:
 class ActorLearnerConfig:
     learner_host: str = "127.0.0.1"
     learner_port: int = 50051
+    # Steps between policy pushes to actor (align with official HIL-SERL steps_per_update=50)
+    steps_per_update: int = 50
+    # Deprecated: kept for backward compat, use steps_per_update instead
     policy_parameters_push_frequency: int = 4
     queue_get_timeout: float = 2
 

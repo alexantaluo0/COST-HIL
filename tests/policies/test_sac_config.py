@@ -128,6 +128,7 @@ def test_sac_config_default_initialization():
     # Actor learner configuration
     assert config.actor_learner_config.learner_host == "127.0.0.1"
     assert config.actor_learner_config.learner_port == 50051
+    assert config.actor_learner_config.steps_per_update == 50
     assert config.actor_learner_config.policy_parameters_push_frequency == 4
 
     # Concurrency configuration
@@ -166,6 +167,7 @@ def test_actor_learner_config():
     config = ActorLearnerConfig()
     assert config.learner_host == "127.0.0.1"
     assert config.learner_port == 50051
+    assert config.steps_per_update == 50
     assert config.policy_parameters_push_frequency == 4
 
 

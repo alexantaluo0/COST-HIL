@@ -654,6 +654,12 @@ def control_loop(
                 "shape": (1,),
                 "names": ["discrete_penalty"],
             }
+            # grasp_penalty from env info (gym_hil GripperPenaltyWrapper); training expects this
+            features["complementary_info.grasp_penalty"] = {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["grasp_penalty"],
+            }
 
         for key, value in transition[TransitionKey.OBSERVATION].items():
             # Handle state-like tensors
@@ -760,8 +766,18 @@ def control_loop(
                 DONE: np.array([terminated or truncated], dtype=bool),
             }
             if use_gripper:
+                # discrete_penalty from processor (real robot); grasp_penalty from env info (gym_hil)
                 discrete_penalty = transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)
                 frame["complementary_info.discrete_penalty"] = np.array([discrete_penalty], dtype=np.float32)
+                # gym_hil puts grasp_penalty in info; fallback to discrete_penalty for real robot
+                info = transition.get(TransitionKey.INFO, {})
+                grasp_penalty = next(
+                    (info[k] for k in ("grasp_penalty", "discrete_penalty", "gripper_penalty") if k in info),
+                    discrete_penalty,
+                )
+                if isinstance(grasp_penalty, (np.ndarray, torch.Tensor)):
+                    grasp_penalty = float(grasp_penalty.item()) if grasp_penalty.size > 0 else 0.0
+                frame["complementary_info.grasp_penalty"] = np.array([float(grasp_penalty)], dtype=np.float32)
 
             if dataset is not None:
                 frame["task"] = cfg.dataset.task

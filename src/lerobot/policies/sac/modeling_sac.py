@@ -182,6 +182,7 @@ class SACPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
             sample_weights: Tensor | None = batch.get("sample_weights")
+            complementary_info = batch.get("complementary_info")
 
             loss_critic = self.compute_loss_critic(
                 observations=observations,
@@ -192,6 +193,7 @@ class SACPolicy(
                 observation_features=observation_features,
                 next_observation_features=next_observation_features,
                 sample_weights=sample_weights,
+                complementary_info=complementary_info,
             )
 
             return {"loss_critic": loss_critic}
@@ -269,7 +271,19 @@ class SACPolicy(
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
         sample_weights: Tensor | None = None,
+        complementary_info: dict | None = None,
     ) -> Tensor:
+        # Align with official HIL-SERL: add grasp_penalty/discrete_penalty to rewards for TD target
+        rewards_for_target = rewards
+        if complementary_info is not None:
+            penalty = complementary_info.get("discrete_penalty")
+            if penalty is None:
+                penalty = complementary_info.get("grasp_penalty")
+            if penalty is not None:
+                if isinstance(penalty, torch.Tensor) and penalty.dim() == 2:
+                    penalty = penalty.squeeze(-1)
+                rewards_for_target = rewards + penalty
+
         with torch.no_grad():
             next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
 
@@ -293,7 +307,7 @@ class SACPolicy(
             if self.config.use_backup_entropy:
                 min_q = min_q - (self.temperature * next_log_probs)
 
-            td_target = rewards + (1 - done) * self.config.discount * min_q
+            td_target = rewards_for_target + (1 - done) * self.config.discount * min_q
 
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:

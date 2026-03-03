@@ -653,9 +653,10 @@ class ReplayBuffer:
         sample = dataset[0]
         has_done_key = DONE in sample
 
-        # Check for complementary_info keys
+        # Check for complementary_info keys (align with official HIL-SERL: also support grasp_penalty)
         complementary_info_keys = [key for key in sample if key.startswith("complementary_info.")]
-        has_complementary_info = len(complementary_info_keys) > 0
+        has_infos_grasp_penalty = "infos" in sample and isinstance(sample.get("infos"), dict) and "grasp_penalty" in sample.get("infos", {})
+        has_complementary_info = len(complementary_info_keys) > 0 or has_infos_grasp_penalty
 
         # If not, we need to infer it from episode boundaries
         if not has_done_key:
@@ -721,6 +722,14 @@ class ReplayBuffer:
                         # TODO: (azouitine) Check if it's necessary to convert to tensor
                         # For non-tensor values, use directly
                         complementary_info[clean_key] = val
+                # Align with official HIL-SERL: map infos.grasp_penalty to complementary_info
+                infos = current_sample.get("infos", {})
+                if isinstance(infos, dict) and "grasp_penalty" in infos:
+                    grasp_penalty = infos["grasp_penalty"]
+                    if isinstance(grasp_penalty, torch.Tensor):
+                        complementary_info["grasp_penalty"] = grasp_penalty.unsqueeze(0)
+                    else:
+                        complementary_info["grasp_penalty"] = torch.tensor([[grasp_penalty]], dtype=torch.float32)
 
             # ----- Construct the Transition -----
             transition = Transition(
@@ -820,17 +829,36 @@ def concatenate_batch_transitions(
     left_info = left_batch_transitions.get("complementary_info")
     right_info = right_batch_transition.get("complementary_info")
 
-    # Only process if right_info exists
-    if right_info is not None:
-        # Initialize left complementary_info if needed
-        if left_info is None:
-            left_batch_transitions["complementary_info"] = right_info
-        else:
-            # Concatenate each field
-            for key in right_info:
-                if key in left_info:
-                    left_info[key] = torch.cat([left_info[key], right_info[key]], dim=0)
-                else:
-                    left_info[key] = right_info[key]
+    if left_info is None and right_info is None:
+        pass
+    elif right_info is None:
+        # Right has no complementary_info; keep left as-is (batch size already matches left)
+        pass
+    elif left_info is None:
+        left_batch_transitions["complementary_info"] = dict(right_info)
+    else:
+        # Merge: ensure both sides have same keys; pad missing keys with zeros (e.g. demo lacks grasp_penalty)
+        right_size = right_batch_transition[ACTION].shape[0]
+        left_size = left_batch_transitions[ACTION].shape[0]
+        all_keys = set(left_info.keys()) | set(right_info.keys())
+
+        for key in all_keys:
+            left_val = left_info.get(key)
+            right_val = right_info.get(key)
+
+            if left_val is not None and right_val is not None:
+                left_info[key] = torch.cat([left_val, right_val], dim=0)
+            elif left_val is not None:
+                # Right lacks this key (e.g. demo has no grasp_penalty): pad with zeros
+                device = left_val.device
+                dtype = left_val.dtype
+                pad = torch.zeros(right_size, *left_val.shape[1:], device=device, dtype=dtype)
+                left_info[key] = torch.cat([left_val, pad], dim=0)
+            else:
+                # Left lacks this key: pad left, then add right
+                device = right_val.device
+                dtype = right_val.dtype
+                pad = torch.zeros(left_size, *right_val.shape[1:], device=device, dtype=dtype)
+                left_info[key] = torch.cat([pad, right_val], dim=0)
 
     return left_batch_transitions

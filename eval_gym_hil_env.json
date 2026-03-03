@@ -134,6 +134,7 @@
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
             "learner_port": 50051,
+            "steps_per_update": 50,
             "policy_parameters_push_frequency": 4
         },
         "concurrency": {
