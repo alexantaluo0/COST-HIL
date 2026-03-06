@@ -65,7 +65,7 @@ from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
-from lerobot.policies.sac.modeling_sac import SACPolicy
+from lerobot.policies.sac.modeling_sac import DISCRETE_DIMENSION_INDEX, SACPolicy
 from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.tensorboard_utils import TensorBoardLogger
@@ -521,10 +521,28 @@ def add_actor_information_and_train(
         ).item()
         optimizers["critic"].step()
 
+        # Compute Q mean and reward mean for logging (no_grad to avoid extra memory)
+        with torch.no_grad():
+            actions_for_critic = (
+                actions[:, :DISCRETE_DIMENSION_INDEX]
+                if policy.config.num_discrete_actions is not None
+                else actions
+            )
+            q_preds = policy.critic_forward(
+                observations=observations,
+                actions=actions_for_critic,
+                use_target=False,
+                observation_features=observation_features,
+            )
+            q_mean = q_preds.mean().item()
+        reward_mean = rewards.mean().item()
+
         # Initialize training info dictionary
         training_infos = {
             "loss_critic": loss_critic.item(),
             "critic_grad_norm": critic_grad_norm,
+            "q_mean": q_mean,
+            "reward_mean": reward_mean,
         }
 
         # Discrete critic optimization (if available)
@@ -588,8 +606,18 @@ def add_actor_information_and_train(
         if optimization_step % log_freq == 0:
             training_infos["replay_buffer_size"] = len(replay_buffer)
             if intervention_buffer is not None:
-                training_infos["offline_buffer_size"] = len(intervention_buffer)
+                training_infos["offline_replay_buffer_size"] = len(intervention_buffer)
             training_infos["Optimization step"] = optimization_step
+
+            # Print training metrics to console
+            log_parts = [
+                f"loss_critic={training_infos['loss_critic']:.4f}",
+                f"q_mean={training_infos['q_mean']:.4f}",
+                f"reward_mean={training_infos['reward_mean']:.4f}",
+            ]
+            if "loss_discrete_critic" in training_infos:
+                log_parts.insert(1, f"loss_discrete_critic={training_infos['loss_discrete_critic']:.4f}")
+            logging.info(f"[LEARNER] step {optimization_step}: {', '.join(log_parts)}")
 
             # Log training metrics
             if tensorboard_logger:

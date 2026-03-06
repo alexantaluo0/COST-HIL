@@ -320,12 +320,18 @@ def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
         use_gripper = cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else True
         gripper_penalty = cfg.processor.gripper.gripper_penalty if cfg.processor.gripper is not None else 0.0
 
+        # Override gym_hil's built-in TimeLimit with our control_time_s
+        max_episode_steps = None
+        if cfg.processor.reset is not None:
+            max_episode_steps = int(cfg.processor.reset.control_time_s * cfg.fps)
+
         env = gym.make(
             f"gym_hil/{cfg.task}",
             image_obs=True,
             render_mode="human",
             use_gripper=use_gripper,
             gripper_penalty=gripper_penalty,
+            max_episode_steps=max_episode_steps,
         )
 
         return env, None
@@ -384,9 +390,18 @@ def make_processors(
         env_pipeline_steps = [
             Numpy2TorchActionProcessorStep(),
             VanillaObservationProcessorStep(),
+        ]
+        # Add time limit so control_time_s takes effect for gym_hil
+        if cfg.processor.reset is not None:
+            env_pipeline_steps.append(
+                TimeLimitProcessorStep(
+                    max_episode_steps=int(cfg.processor.reset.control_time_s * cfg.fps)
+                )
+            )
+        env_pipeline_steps.extend([
             AddBatchDimensionProcessorStep(),
             DeviceProcessorStep(device=device),
-        ]
+        ])
 
         return DataProcessorPipeline(
             steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition

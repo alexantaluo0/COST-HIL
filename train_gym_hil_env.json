@@ -8,7 +8,7 @@
     "steps": 100000,
     "log_freq": 1,
     "save_checkpoint": true,
-    "save_freq": 2000,
+    "save_freq": 5000,
     "wandb": {
         "enable": true,
         "project": "hil-serl-panda-pick",
@@ -141,8 +141,8 @@
         "shared_encoder": true,
         "use_torch_compile": false,
         "online_steps": 1000000,
-        "online_buffer_capacity": 13000,
-        "offline_buffer_capacity": 2000,
+        "online_buffer_capacity": 20000,
+        "offline_buffer_capacity": 20000,
         "online_step_before_learning": 100,
         "policy_update_freq": 1,
         "discount": 0.97,
@@ -190,12 +190,26 @@
         "concurrency": {
             "actor": "threads",
             "learner": "threads"
+        },
+        "step_penalty": {
+            "enabled": true,
+            "min_steps": 15,
+            "max_steps": 65,
+            "max_penalty": -0.1,
+            "weight_continuous": 1.0,
+            "weight_discrete": 1.0
+        },
+        "gripper_control": {
+            "enabled": true,
+            "cooldown_steps": 10,
+            "penalty_window_steps": 10,
+            "switching_penalty": -0.02
         }
     },
     "env": {
         "type": "gym_manipulator",
         "name": "gym_hil",
-        "task": "PandaPickCubeKeyboard-v0",
+        "task": "PandaPickCubeGamepad-v0",
         "fps": 10,
         "features": {
             "observation.images.front": {
@@ -234,13 +248,13 @@
             "action": "action"
         },
         "processor": {
-            "control_mode": "keyboard",
+            "control_mode": "gamepad",
             "gripper": {
                 "use_gripper": true,
                 "gripper_penalty": -0.02
             },
             "reset": {
-                "control_time_s": 60.0,
+                "control_time_s": 15.0,
                 "reset_time_s": 2.0,
                 "fixed_reset_joint_positions": [
                     0.0,

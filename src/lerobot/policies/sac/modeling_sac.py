@@ -81,14 +81,20 @@ class SACPolicy(
         raise NotImplementedError("SACPolicy does not support action chunking. It returns single actions!")
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Select action for inference/evaluation"""
+    def select_action(self, batch: dict[str, Tensor], deterministic: bool = False) -> Tensor:
+        """Select action for inference/evaluation.
+
+        Args:
+            batch: Dictionary of observation tensors.
+            deterministic: If True, use the mean (mode) of the action distribution
+                instead of sampling. Recommended for evaluation to reduce variance.
+        """
 
         observations_features = None
         if self.shared_encoder and self.actor.encoder.has_images:
             observations_features = self.actor.encoder.get_cached_image_features(batch)
 
-        actions, _, _ = self.actor(batch, observations_features)
+        actions, _, _ = self.actor(batch, observations_features, deterministic=deterministic)
 
         if self.config.num_discrete_actions is not None:
             discrete_action_value = self.discrete_critic(batch, observations_features)
@@ -309,6 +315,20 @@ class SACPolicy(
 
             td_target = rewards_for_target + (1 - done) * self.config.discount * min_q
 
+            # Apply step penalty to continuous critic TD target (v0.1.5)
+            step_penalty_config = getattr(self.config, "step_penalty", None)
+            if step_penalty_config is not None and getattr(step_penalty_config, "enabled", False):
+                step_penalties = complementary_info.get("step_penalty") if complementary_info else None
+                if step_penalties is not None:
+                    if step_penalties.dim() > 1:
+                        step_penalties = step_penalties.squeeze(-1)
+                    if step_penalties.shape[0] < td_target.shape[0]:
+                        pad_size = td_target.shape[0] - step_penalties.shape[0]
+                        step_penalties = torch.cat(
+                            [step_penalties, torch.zeros(pad_size, device=step_penalties.device)], dim=0
+                        )
+                    td_target = td_target + step_penalties * step_penalty_config.weight_continuous
+
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:
             # NOTE: We only want to keep the continuous action part
@@ -386,6 +406,21 @@ class SACPolicy(
             rewards_discrete = rewards
             if discrete_penalties is not None:
                 rewards_discrete = rewards + discrete_penalties
+
+            # Apply step penalty to discrete critic TD target (v0.1.5)
+            step_penalty_config = getattr(self.config, "step_penalty", None)
+            if step_penalty_config is not None and getattr(step_penalty_config, "enabled", False):
+                step_penalties = complementary_info.get("step_penalty") if complementary_info else None
+                if step_penalties is not None:
+                    if step_penalties.dim() > 1:
+                        step_penalties = step_penalties.squeeze(-1)
+                    if step_penalties.shape[0] < rewards_discrete.shape[0]:
+                        pad_size = rewards_discrete.shape[0] - step_penalties.shape[0]
+                        step_penalties = torch.cat(
+                            [step_penalties, torch.zeros(pad_size, device=step_penalties.device)], dim=0
+                        )
+                    rewards_discrete = rewards_discrete + step_penalties * step_penalty_config.weight_discrete
+
             target_discrete_q = rewards_discrete + (1 - done) * self.config.discount * target_next_discrete_q
 
         # Get predicted Q-values for current observations
@@ -920,6 +955,7 @@ class Policy(nn.Module):
         self,
         observations: torch.Tensor,
         observation_features: torch.Tensor | None = None,
+        deterministic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # We detach the encoder if it is shared to avoid backprop through it
         # This is important to avoid the encoder to be updated through the policy
@@ -940,11 +976,14 @@ class Policy(nn.Module):
         # Build transformed distribution
         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
 
-        # Sample actions (reparameterized)
-        actions = dist.rsample()
-
-        # Compute log_probs
-        log_probs = dist.log_prob(actions)
+        if deterministic:
+            # Use deterministic mode (mean passed through tanh) for evaluation
+            actions = dist.mode()
+            log_probs = dist.log_prob(actions)
+        else:
+            # Sample actions (reparameterized) for training
+            actions = dist.rsample()
+            log_probs = dist.log_prob(actions)
 
         return actions, log_probs, means
 

@@ -72,6 +72,45 @@ class ActorNetworkConfig:
 
 
 @dataclass
+class StepPenaltyConfig:
+    """Configuration for step-based penalty to encourage fast task completion.
+
+    Applies a linearly increasing penalty based on episode step count:
+    - step < min_steps: penalty = 0
+    - min_steps <= step <= max_steps: penalty = (step - min_steps) / (max_steps - min_steps) * max_penalty
+    - step > max_steps: penalty = max_penalty
+
+    The penalty is applied independently to the continuous critic and discrete critic
+    with separate weight multipliers.
+    """
+
+    enabled: bool = False
+    min_steps: int = 15
+    max_steps: int = 65
+    max_penalty: float = -0.1
+    weight_continuous: float = 1.0  # Weight for continuous critic
+    weight_discrete: float = 1.0  # Weight for discrete critic
+
+
+@dataclass
+class GripperControlConfig:
+    """Anti-oscillation control for gripper discrete actions.
+
+    Combines two mechanisms:
+    - Cooldown: after a gripper action change, lock the action for cooldown_steps
+    - Frequency penalty: penalize switching again within penalty_window_steps of the last switch
+
+    The first switch is always free (no penalty). The penalty is added to the existing
+    discrete_penalty field in complementary_info.
+    """
+
+    enabled: bool = False
+    cooldown_steps: int = 10  # Lock gripper action for N steps after switch
+    penalty_window_steps: int = 10  # Window to detect rapid switching (should be > cooldown_steps)
+    switching_penalty: float = -0.02  # Penalty for switching within window
+
+
+@dataclass
 class PolicyConfig:
     use_tanh_squash: bool = True
     std_min: float = 1e-5
@@ -196,6 +235,10 @@ class SACConfig(PreTrainedConfig):
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
     # Configuration for concurrency settings (you can use threads or processes for the actor and learner)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
+    # Configuration for step-based penalty to encourage fast task completion
+    step_penalty: StepPenaltyConfig = field(default_factory=StepPenaltyConfig)
+    # Configuration for gripper anti-oscillation control
+    gripper_control: GripperControlConfig = field(default_factory=GripperControlConfig)
 
     # Optimizations
     use_torch_compile: bool = False

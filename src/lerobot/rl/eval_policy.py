@@ -146,7 +146,7 @@ def eval_policy(env, policy, n_episodes, device="cpu"):
         step_count = 0
         
         while True:
-            action = policy.select_action(obs)
+            action = policy.select_action(obs, deterministic=True)
             # Remove batch dimension and convert to numpy
             action_np = action.squeeze(0).cpu().numpy()
             obs, reward, terminated, truncated, _ = env.step(action_np)

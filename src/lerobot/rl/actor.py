@@ -281,6 +281,11 @@ def act_with_policy(
     episode_intervention_steps = 0
     episode_total_steps = 0
 
+    # Gripper anti-oscillation state (v0.1.5)
+    gripper_locked_action = None
+    gripper_cooldown_remaining = 0
+    gripper_last_switch_step = -999
+
     # Hypothesis 1: Adaptive intervention scheduler (separate module for ablation)
     intervention_scheduler = None
     intervention_ui_prompt = None
@@ -326,6 +331,8 @@ def act_with_policy(
                 k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in cfg.policy.input_features
             }
 
+            gripper_switch_penalty = 0.0
+
             # Wait mode: UI prompt appeared, actor pauses until user presses Space or episode ends.
             # If user never presses Space, episode timeout will reset. If user presses Space, use teleop.
             waiting_for_intervention = (
@@ -342,6 +349,29 @@ def act_with_policy(
                     action = policy.select_action(batch=observation)
                 policy_fps = policy_timer.fps_last
                 log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
+
+                # Gripper anti-oscillation: cooldown + frequency penalty (v0.1.5)
+                gc = getattr(cfg.policy, "gripper_control", None)
+                if (
+                    gc is not None
+                    and getattr(gc, "enabled", False)
+                    and cfg.policy.num_discrete_actions is not None
+                ):
+                    policy_gripper = int(round(action[0, -1].item()))
+                    if gripper_cooldown_remaining > 0:
+                        action[0, -1] = float(gripper_locked_action)
+                        gripper_cooldown_remaining -= 1
+                    else:
+                        if gripper_locked_action is not None and policy_gripper != gripper_locked_action:
+                            steps_since = episode_total_steps - gripper_last_switch_step
+                            if steps_since < gc.penalty_window_steps:
+                                gripper_switch_penalty = gc.switching_penalty
+                            gripper_last_switch_step = episode_total_steps
+                            gripper_locked_action = policy_gripper
+                            gripper_cooldown_remaining = gc.cooldown_steps - 1
+                        else:
+                            if gripper_locked_action is None:
+                                gripper_locked_action = policy_gripper
 
                 # Human intervention: user pressed Space -> teleop (unified path).
                 # Manual Space (no prompt) and UI-prompted Space both use same teleop flow.
@@ -399,10 +429,29 @@ def act_with_policy(
                     interaction_step=interaction_step,
                 )
 
+            # Step penalty to encourage fast task completion (v0.1.5)
+            step_penalty_value = 0.0
+            sp = getattr(cfg.policy, "step_penalty", None)
+            if sp is not None and getattr(sp, "enabled", False):
+                if episode_total_steps < sp.min_steps:
+                    step_penalty_value = 0.0
+                elif episode_total_steps <= sp.max_steps:
+                    step_penalty_value = (
+                        (episode_total_steps - sp.min_steps)
+                        / (sp.max_steps - sp.min_steps)
+                        * sp.max_penalty
+                    )
+                else:
+                    step_penalty_value = sp.max_penalty
+
+            base_discrete_penalty = new_transition[TransitionKey.COMPLEMENTARY_DATA].get(
+                "discrete_penalty", 0.0
+            )
             complementary_info = {
                 "discrete_penalty": torch.tensor(
-                    [new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)]
+                    [base_discrete_penalty + gripper_switch_penalty], device=device
                 ),
+                "step_penalty": torch.tensor([step_penalty_value], device=device),
                 TeleopEvents.IS_INTERVENTION.value: is_intervention,  # Add intervention flag to complementary_info
             }
             if intervention_scheduler is not None:
@@ -443,7 +492,9 @@ def act_with_policy(
             transition = new_transition
 
             if done or truncated:
-                logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
+                logging.info(
+                    f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}, Episode steps: {episode_total_steps}"
+                )
 
                 update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
 
@@ -480,12 +531,27 @@ def act_with_policy(
                 episode_intervention = False
                 episode_intervention_steps = 0
                 episode_total_steps = 0
+                # Reset gripper anti-oscillation state (v0.1.5)
+                gripper_locked_action = None
+                gripper_cooldown_remaining = 0
+                gripper_last_switch_step = -999
                 if intervention_scheduler is not None:
                     intervention_scheduler.reset()
                 if intervention_ui_prompt is not None:
                     intervention_ui_prompt.update(False)  # Hide prompt on episode end
                 suggested_intervention_prev = False
                 auto_intervention_steps = 0
+
+                # Wait before starting next episode (reset_time_s)
+                reset_time_s = None
+                if (
+                    cfg.env.processor is not None
+                    and cfg.env.processor.reset is not None
+                ):
+                    reset_time_s = getattr(cfg.env.processor.reset, "reset_time_s", None)
+                if reset_time_s is not None and reset_time_s > 0:
+                    logging.info(f"[ACTOR] Waiting {reset_time_s}s before next episode...")
+                    precise_sleep(reset_time_s)
 
                 # Reset environment and processors
                 obs, info = online_env.reset()
