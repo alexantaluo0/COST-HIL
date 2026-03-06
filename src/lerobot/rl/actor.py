@@ -286,6 +286,68 @@ def act_with_policy(
     gripper_cooldown_remaining = 0
     gripper_last_switch_step = -999
 
+    # Gamepad RB toggle patch: single press to toggle intervention, instead of hold
+    def _find_gamepad_controller(env):
+        """Walk the gym wrapper chain to find GamepadController (has joystick, no key_states)."""
+        current = env
+        while current is not None:
+            ctrl = getattr(current, "controller", None)
+            if ctrl is not None and hasattr(ctrl, "joystick") and not hasattr(ctrl, "key_states"):
+                return ctrl
+            current = getattr(current, "env", None)
+        return None
+
+    _gamepad_controller = _find_gamepad_controller(online_env)
+    if _gamepad_controller is not None:
+        import pygame as _pygame
+
+        # Flush stale events accumulated during pygame/joystick initialization
+        _pygame.event.clear()
+
+        def _patched_gamepad_update():
+            _btns = _gamepad_controller.controller_config.get("buttons", {})
+            _rb = _btns.get("rb", 5)
+            _y  = _btns.get("y",  3)
+            _a  = _btns.get("a",  0)
+            _x  = _btns.get("x",  2)
+            _lt = _btns.get("lt", 6)
+            _rt = _btns.get("rt", 7)
+            for _ev in _pygame.event.get():
+                if _ev.type == _pygame.JOYBUTTONDOWN:
+                    if _ev.button == _rb:
+                        _gamepad_controller.intervention_flag = not _gamepad_controller.intervention_flag
+                        _state = "人工干预" if _gamepad_controller.intervention_flag else "AI控制"
+                        logging.info("[ACTOR] 手柄 RB 切换: %s", _state)
+                    elif _ev.button == _y:
+                        _gamepad_controller.episode_end_status = "success"
+                    elif _ev.button == _a:
+                        _gamepad_controller.episode_end_status = "failure"
+                    elif _ev.button == _x:
+                        _gamepad_controller.episode_end_status = "rerecord_episode"
+                    elif _ev.button == _lt:
+                        _gamepad_controller.close_gripper_command = True
+                    elif _ev.button == _rt:
+                        _gamepad_controller.open_gripper_command = True
+                elif _ev.type == _pygame.JOYBUTTONUP:
+                    if _ev.button in [_x, _a, _y]:
+                        _gamepad_controller.episode_end_status = None
+                    elif _ev.button == _lt:
+                        _gamepad_controller.close_gripper_command = False
+                    elif _ev.button == _rt:
+                        _gamepad_controller.open_gripper_command = False
+
+        def _patched_gamepad_reset():
+            _gamepad_controller.intervention_flag = False
+            _gamepad_controller.open_gripper_command = False
+            _gamepad_controller.close_gripper_command = False
+            _gamepad_controller.episode_end_status = None
+            _pygame.event.clear()
+
+        _gamepad_controller.update = _patched_gamepad_update
+        _gamepad_controller.reset = _patched_gamepad_reset
+        print("[ACTOR] 手柄已启用: 单按 RB 切换干预/AI控制模式")
+        logging.info("[ACTOR] 手柄 RB 切换模式已激活")
+
     # Hypothesis 1: Adaptive intervention scheduler (separate module for ablation)
     intervention_scheduler = None
     intervention_ui_prompt = None
