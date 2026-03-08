@@ -1,10 +1,10 @@
 {
     "env": {
         "name": "gym_hil",
-        "task": "PandaPickCubeKeyboard-v0",
+        "task": "PandaPickCubeGamepad-v0",
         "fps": 10,
         "processor": {
-            "control_mode": "keyboard",
+            "control_mode": "gamepad",
             "gripper": {
                 "use_gripper": true,
                 "gripper_penalty": -0.02
@@ -50,9 +50,9 @@
         }
     },
     "dataset": {
-        "repo_id": "alexanta/sim_keyboard_dataset3",
+        "repo_id": "alexanta/sim_gamepad_dataset_test",
         "task": "PandaPickCubeKeyboard-v0",
-        "root": "E:/HIL-SERL/datasets/sim_keyboard_dataset_0303_ID1",
+        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_test",
         "num_episodes_to_record": 30,
         "replay_episode": null,
         "push_to_hub": true

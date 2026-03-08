@@ -20,7 +20,7 @@
         "max_parallel_tasks": 1,
         "disable_env_checker": true,
         "processor": {
-            "control_mode": "keyboard",
+            "control_mode": "gamepad",
             "gripper": {
                 "use_gripper": true,
                 "gripper_penalty": -0.02
