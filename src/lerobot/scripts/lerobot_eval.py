@@ -47,6 +47,7 @@ You can learn about the CLI options for this script in the `EvalPipelineConfig` 
 """
 
 import concurrent.futures as cf
+import inspect
 import json
 import logging
 import threading
@@ -152,6 +153,18 @@ def rollout(
     # Keep track of which environments are done.
     done = np.array([False] * env.num_envs)
     max_steps = env.call("_max_episode_steps")[0]
+
+    # Gripper anti-oscillation state (align with training actor)
+    gc = getattr(policy.config, "gripper_control", None)
+    use_gripper_control = (
+        gc is not None
+        and getattr(gc, "enabled", False)
+        and getattr(policy.config, "num_discrete_actions", None) is not None
+    )
+    gripper_locked_action = np.full(env.num_envs, -1, dtype=np.int64)  # -1 = not set
+    gripper_cooldown_remaining = np.zeros(env.num_envs, dtype=np.int64)
+    gripper_last_switch_step = np.full(env.num_envs, -999, dtype=np.int64)
+
     progbar = trange(
         max_steps,
         desc=f"Running rollout with at most {max_steps} steps",
@@ -181,7 +194,28 @@ def rollout(
 
         observation = preprocessor(observation)
         with torch.inference_mode():
-            action = policy.select_action(observation)
+            # Use deterministic=True for SAC (align with training actor, reduces gripper variance)
+            sig = inspect.signature(policy.select_action)
+            if "deterministic" in sig.parameters:
+                action = policy.select_action(observation, deterministic=True)
+            else:
+                action = policy.select_action(observation)
+        # Gripper anti-oscillation: cooldown (align with training actor)
+        if use_gripper_control:
+            num_disc = policy.config.num_discrete_actions
+            policy_gripper = action[:, -1].float().round().long().clamp(0, num_disc - 1).cpu().numpy()
+            for i in range(env.num_envs):
+                if gripper_cooldown_remaining[i] > 0:
+                    action[i, -1] = float(gripper_locked_action[i])
+                    gripper_cooldown_remaining[i] -= 1
+                else:
+                    if gripper_locked_action[i] >= 0 and policy_gripper[i] != gripper_locked_action[i]:
+                        gripper_last_switch_step[i] = step
+                        gripper_locked_action[i] = policy_gripper[i]
+                        gripper_cooldown_remaining[i] = gc.cooldown_steps - 1
+                    else:
+                        if gripper_locked_action[i] < 0:
+                            gripper_locked_action[i] = policy_gripper[i]
         action = postprocessor(action)
 
         action_transition = {"action": action}
@@ -231,6 +265,14 @@ def rollout(
         done = terminated | truncated | done
         if step + 1 == max_steps:
             done = np.ones_like(done, dtype=bool)
+
+        # Reset gripper state for envs that just finished (align with training actor)
+        if use_gripper_control:
+            for i in range(env.num_envs):
+                if terminated[i] or truncated[i]:
+                    gripper_locked_action[i] = -1
+                    gripper_cooldown_remaining[i] = 0
+                    gripper_last_switch_step[i] = -999
 
         all_actions.append(torch.from_numpy(action_numpy))
         all_rewards.append(torch.from_numpy(reward))

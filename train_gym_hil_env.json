@@ -141,8 +141,8 @@
         "shared_encoder": true,
         "use_torch_compile": false,
         "online_steps": 1000000,
-        "online_buffer_capacity": 100000,
-        "offline_buffer_capacity": 100000,
+        "online_buffer_capacity": 40000,
+        "offline_buffer_capacity": 40000,
         "online_step_before_learning": 100,
         "policy_update_freq": 1,
         "discount": 0.97,
@@ -192,10 +192,10 @@
             "learner": "threads"
         },
         "step_penalty": {
-            "enabled": true,
+            "enabled": false,
             "min_steps": 15,
             "max_steps": 65,
-            "max_penalty": -0.1,
+            "max_penalty": -0.05,
             "weight_continuous": 1.0,
             "weight_discrete": 1.0
         },
@@ -203,7 +203,7 @@
             "enabled": true,
             "cooldown_steps": 10,
             "penalty_window_steps": 10,
-            "switching_penalty": -0.02
+            "switching_penalty": -0.002
         }
     },
     "env": {
@@ -295,8 +295,8 @@
     },
     "intervention_scheduler": {
         "enabled": true,
-        "uncertainty_threshold_high_start": 0.2,
-        "uncertainty_threshold_high_end": 0.8,
+        "uncertainty_threshold_high_start": 0.5,
+        "uncertainty_threshold_high_end": 1.0,
         "uncertainty_threshold_ramp_end_step": 20000,
         "uncertainty_threshold_low": 0.1,
         "min_steps_between_interventions": 10,
