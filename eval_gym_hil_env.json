@@ -3,8 +3,8 @@
     "job_name": "eval_default",
     "seed": 1000,
     "dataset": {
-        "repo_id": "alexanta/sim_gamepad_dataset_test",
-        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_test",
+        "repo_id": "alexanta/sim_gamepad_dataset_eval",
+        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_eval",
         "use_imagenet_stats": false
     },
     "eval": {
@@ -27,7 +27,7 @@
             },
             "reset": {
                 "control_time_s": 20.0,
-                "reset_time_s": 2.0,
+                "reset_time_s": 1.0,
                 "fixed_reset_joint_positions": [0.0, 0.195, 0.0, -2.43, 0.0, 2.62, 0.785],
                 "terminate_on_success": true
             },
@@ -59,9 +59,9 @@
     },
     "policy": {
         "type": "sac",
-        "pretrained_path": "D:/code/lerobot-hilserl/outputs/train/2026-03-11/10-30-34_default/checkpoints/0015000/pretrained_model",
+        "pretrained_path": "D:/code/lerobot-hilserl/outputs/train/2026-03-11/19-38-29_default/checkpoints/0020000/pretrained_model",
         "n_obs_steps": 1,
-        "repo_id": "alexanta/policy_panda_pick_gamepad_test",
+        "repo_id": "alexanta/policy_panda_pick_gamepad_eval",
         "normalization_mapping": {
             "VISUAL": "MEAN_STD",
             "STATE": "MIN_MAX",
@@ -134,7 +134,6 @@
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
             "learner_port": 50051,
-            "steps_per_update": 50,
             "policy_parameters_push_frequency": 4
         },
         "concurrency": {
@@ -145,9 +144,8 @@
             "enabled": true,
             "cooldown_steps": 10,
             "penalty_window_steps": 10,
-            "switching_penalty": -0.002
+            "switching_penalty": -0.005
         }
     },
     "rename_map": {}
 }
-

@@ -50,9 +50,9 @@
         }
     },
     "dataset": {
-        "repo_id": "alexanta/sim_gamepad_dataset_test",
+        "repo_id": "alexanta/sim_gamepad_dataset_eval",
         "task": "PandaPickCubeKeyboard-v0",
-        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_test",
+        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_eval",
         "num_episodes_to_record": 30,
         "replay_episode": null,
         "push_to_hub": true
