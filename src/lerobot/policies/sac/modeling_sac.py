@@ -190,7 +190,8 @@ class SACPolicy(
             sample_weights: Tensor | None = batch.get("sample_weights")
             complementary_info = batch.get("complementary_info")
 
-            loss_critic = self.compute_loss_critic(
+            return_per_metadata = batch.get("return_per_metadata", False)
+            result = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -200,9 +201,11 @@ class SACPolicy(
                 next_observation_features=next_observation_features,
                 sample_weights=sample_weights,
                 complementary_info=complementary_info,
+                return_per_metadata=return_per_metadata,
             )
-
-            return {"loss_critic": loss_critic}
+            if return_per_metadata:
+                return result
+            return {"loss_critic": result}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -278,7 +281,8 @@ class SACPolicy(
         next_observation_features: Tensor | None = None,
         sample_weights: Tensor | None = None,
         complementary_info: dict | None = None,
-    ) -> Tensor:
+        return_per_metadata: bool = False,
+    ) -> Tensor | dict[str, Tensor]:
         # Align with official HIL-SERL: add grasp_penalty/discrete_penalty to rewards for TD target
         rewards_for_target = rewards
         if complementary_info is not None:
@@ -357,6 +361,16 @@ class SACPolicy(
             critics_loss = (mse_per_element * w).sum() / (w.sum() * mse_per_element.shape[0] + 1e-8)
         else:
             critics_loss = mse_per_element.mean(dim=1).sum()
+
+        if return_per_metadata:
+            with torch.no_grad():
+                per_sample_td = mse_per_element.mean(dim=0)
+                q_value_mean = q_preds.mean(dim=0)
+            return {
+                "loss_critic": critics_loss,
+                "per_sample_td": per_sample_td,
+                "q_value_mean": q_value_mean,
+            }
         return critics_loss
 
     def compute_loss_discrete_critic(

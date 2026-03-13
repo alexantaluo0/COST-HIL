@@ -53,3 +53,28 @@ class WeightedInterventionConfig:
     enabled: bool = False
     intervention_quality_key: str = "intervention_quality"
     min_intervention_weight: float = 0.1
+
+
+@dataclass
+class BISOptimizationConfig:
+    """v0.1.7 BIS-inspired data efficiency: PER + TIS + adaptive mixing.
+
+    参数说明（详见 configs/bis_optimization_params.md）:
+    - enabled: 是否启用 BIS 优化
+    - per_alpha: 优先级指数，0=均匀采样，1=完全优先级
+    - per_beta_start/end/frames: 重要性采样 beta 的 anneal 参数
+    - enable_tis: 是否用 Q 值作为可靠性（TIS = 信息量 × 可靠性）
+    - adaptive_mix_*: 动态 online/offline 混合比例（基于 loss EMA）
+    - mix_update_interval: 每隔多少步更新混合比例
+    """
+
+    enabled: bool = False
+    per_alpha: float = 0.3  # 优先级指数，0=均匀，1=完全优先级
+    per_beta_start: float = 0.7  # IS 校正 beta 初始值
+    per_beta_end: float = 1.0  # IS 校正 beta 终值
+    per_beta_frames: int = 500000  # beta anneal 帧数
+    enable_tis: bool = True  # TIS: 信息量(TD) × 可靠性(Q)
+    adaptive_mix_ema_decay: float = 0.99  # loss EMA 衰减
+    adaptive_mix_min_ratio: float = 0.2  # online 最小比例
+    adaptive_mix_max_ratio: float = 0.8  # online 最大比例
+    mix_update_interval: int = 500  # 混合比例更新间隔（步）

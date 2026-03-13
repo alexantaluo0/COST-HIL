@@ -746,6 +746,355 @@ class ReplayBuffer:
         return transitions
 
 
+# ============================================================================
+# Prioritized Experience Replay (PER) - Inspired by BIS paper (arXiv 2602.04145)
+# ============================================================================
+
+
+class SumTree:
+    """Binary sum tree for O(log n) prioritized sampling.
+
+    Stores priorities in leaf nodes and maintains parent sums for efficient
+    proportional sampling. Used internally by PrioritizedReplayBuffer.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.tree = torch.zeros(2 * capacity - 1)
+
+    def update(self, data_idx: int, priority: float):
+        """Update priority of a leaf node and propagate change to root."""
+        tree_idx = data_idx + self.capacity - 1
+        change = priority - self.tree[tree_idx].item()
+        self.tree[tree_idx] = priority
+        while tree_idx != 0:
+            tree_idx = (tree_idx - 1) // 2
+            self.tree[tree_idx] += change
+
+    def get(self, cumsum: float) -> tuple[int, float]:
+        """Find leaf node corresponding to a cumulative sum value."""
+        idx = 0
+        while True:
+            left = 2 * idx + 1
+            right = left + 1
+            if left >= len(self.tree):
+                break
+            if cumsum <= self.tree[left].item():
+                idx = left
+            else:
+                cumsum -= self.tree[left].item()
+                idx = right
+        data_idx = idx - self.capacity + 1
+        return data_idx, self.tree[idx].item()
+
+    def batch_sample(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stratified sampling of batch_size leaves."""
+        total = self.total
+        if total <= 0:
+            indices = torch.randint(0, max(self.capacity, 1), (batch_size,))
+            return indices, torch.ones(batch_size)
+
+        segment = total / batch_size
+        indices = torch.empty(batch_size, dtype=torch.long)
+        priorities = torch.empty(batch_size)
+
+        for i in range(batch_size):
+            low = segment * i
+            high = segment * (i + 1)
+            cumsum = min(torch.empty(1).uniform_(low, high).item(), total - 1e-8)
+            data_idx, priority = self.get(cumsum)
+            indices[i] = max(0, min(data_idx, self.capacity - 1))
+            priorities[i] = max(priority, 1e-8)
+
+        return indices, priorities
+
+    @property
+    def total(self) -> float:
+        """Total sum of all priorities."""
+        return self.tree[0].item()
+
+    def max_priority(self) -> float:
+        """Maximum priority among all leaves."""
+        leaves = self.tree[self.capacity - 1 :]
+        return max(leaves.max().item(), 1e-6)
+
+
+class AdaptiveMixer:
+    """Adaptive online/offline batch mixing based on loss statistics.
+
+    When online loss is higher, more online data is sampled; vice versa.
+    """
+
+    def __init__(
+        self,
+        total_batch_size: int,
+        ema_decay: float = 0.99,
+        min_ratio: float = 0.2,
+        max_ratio: float = 0.8,
+    ):
+        self.total_batch_size = total_batch_size
+        self.ema_decay = ema_decay
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
+        self.online_loss_ema = 0.0
+        self.offline_loss_ema = 0.0
+        self.online_ratio = 0.5
+        self._initialized = False
+
+    def update(self, online_loss: float, offline_loss: float | None = None):
+        """Update loss statistics and recompute mixing ratio."""
+        if offline_loss is None:
+            return
+        if not self._initialized:
+            self.online_loss_ema = online_loss
+            self.offline_loss_ema = offline_loss
+            self._initialized = True
+        else:
+            self.online_loss_ema = (
+                self.ema_decay * self.online_loss_ema + (1 - self.ema_decay) * online_loss
+            )
+            self.offline_loss_ema = (
+                self.ema_decay * self.offline_loss_ema + (1 - self.ema_decay) * offline_loss
+            )
+        total = self.online_loss_ema + self.offline_loss_ema
+        if total > 0:
+            self.online_ratio = self.online_loss_ema / total
+            self.online_ratio = max(self.min_ratio, min(self.max_ratio, self.online_ratio))
+
+    def get_batch_sizes(self) -> tuple[int, int]:
+        """Get current batch sizes for online and offline buffers."""
+        online_size = max(1, int(self.total_batch_size * self.online_ratio))
+        offline_size = max(1, self.total_batch_size - online_size)
+        return online_size, offline_size
+
+
+class PrioritizedReplayBuffer(ReplayBuffer):
+    """Replay buffer with PER and TIS scoring (BIS-inspired)."""
+
+    def __init__(
+        self,
+        capacity: int,
+        device: str = "cuda:0",
+        alpha: float = 0.3,
+        beta_start: float = 0.7,
+        beta_end: float = 1.0,
+        beta_frames: int = 500000,
+        epsilon: float = 1e-6,
+        enable_tis: bool = True,
+        **kwargs,
+    ):
+        super().__init__(capacity=capacity, device=device, **kwargs)
+        self.alpha = alpha
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self.beta_frames = beta_frames
+        self.epsilon = epsilon
+        self.enable_tis = enable_tis
+        self.sum_tree = SumTree(capacity)
+        self._max_priority = 1.0
+        self._frame_count = 0
+
+    @property
+    def beta(self) -> float:
+        """Current beta, annealed linearly."""
+        fraction = min(self._frame_count / max(self.beta_frames, 1), 1.0)
+        return self.beta_start + fraction * (self.beta_end - self.beta_start)
+
+    def add(
+        self,
+        state: dict[str, torch.Tensor],
+        action: torch.Tensor,
+        reward: float,
+        next_state: dict[str, torch.Tensor],
+        done: bool,
+        truncated: bool,
+        complementary_info: dict[str, torch.Tensor] | None = None,
+        priority_boost: float = 1.0,
+    ):
+        """Add a transition with priority-aware initialisation."""
+        pos = self.position
+        super().add(
+            state=state,
+            action=action,
+            reward=reward,
+            next_state=next_state,
+            done=done,
+            truncated=truncated,
+            complementary_info=complementary_info,
+        )
+        initial_priority = (self._max_priority * priority_boost) ** self.alpha
+        self.sum_tree.update(pos, max(initial_priority, self.epsilon))
+
+    def sample(self, batch_size: int) -> BatchTransition:
+        """Sample a batch using proportional prioritisation. Returns _sample_indices."""
+        if not self.initialized:
+            raise RuntimeError("Cannot sample from an empty buffer.")
+
+        batch_size = min(batch_size, self.size)
+        self._frame_count += batch_size
+
+        idx, _ = self.sum_tree.batch_sample(batch_size)
+        idx = idx.clamp(0, self.size - 1)
+        if self.optimize_memory and self.size < self.capacity:
+            idx = idx.clamp(0, max(0, self.size - 2))
+
+        idx = idx.to(self.storage_device)
+        image_keys = [k for k in self.states if k.startswith(OBS_IMAGE)] if self.use_drq else []
+
+        batch_state: dict[str, torch.Tensor] = {}
+        batch_next_state: dict[str, torch.Tensor] = {}
+        for key in self.states:
+            batch_state[key] = self.states[key][idx].to(self.device)
+            if not self.optimize_memory:
+                batch_next_state[key] = self.next_states[key][idx].to(self.device)
+            else:
+                next_idx = (idx + 1) % self.capacity
+                batch_next_state[key] = self.states[key][next_idx].to(self.device)
+
+        if self.use_drq and image_keys:
+            all_images = []
+            for key in image_keys:
+                all_images.append(batch_state[key])
+                all_images.append(batch_next_state[key])
+            all_images_tensor = torch.cat(all_images, dim=0)
+            augmented = self.image_augmentation_function(all_images_tensor)
+            for i, key in enumerate(image_keys):
+                batch_state[key] = augmented[i * 2 * batch_size : (i * 2 + 1) * batch_size]
+                batch_next_state[key] = augmented[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
+
+        batch_actions = self.actions[idx].to(self.device)
+        batch_rewards = self.rewards[idx].to(self.device)
+        batch_dones = self.dones[idx].to(self.device).float()
+        batch_truncateds = self.truncateds[idx].to(self.device).float()
+
+        batch_complementary_info = None
+        if self.has_complementary_info:
+            batch_complementary_info = {}
+            for key in self.complementary_info_keys:
+                batch_complementary_info[key] = self.complementary_info[key][idx].to(self.device)
+
+        batch: BatchTransition = BatchTransition(
+            state=batch_state,
+            action=batch_actions,
+            reward=batch_rewards,
+            next_state=batch_next_state,
+            done=batch_dones,
+            truncated=batch_truncateds,
+            complementary_info=batch_complementary_info,
+        )
+        batch["_sample_indices"] = idx  # type: ignore[typeddict-unknown-key]
+        return batch
+
+    def update_priorities(
+        self,
+        indices: torch.Tensor,
+        td_errors: torch.Tensor,
+        q_values: torch.Tensor | None = None,
+    ):
+        """Update priorities: informativeness (TD) x reliability (Q) when enable_tis."""
+        td_errors = td_errors.detach().cpu().float()
+        indices = indices.detach().cpu()
+
+        if self.enable_tis and q_values is not None:
+            q_values = q_values.detach().cpu().float()
+            priorities = self._compute_tis_priorities(td_errors, q_values)
+        else:
+            priorities = torch.abs(td_errors) + self.epsilon
+
+        alpha_priorities = priorities**self.alpha
+        for i in range(len(indices)):
+            idx_val = indices[i].item()
+            if 0 <= idx_val < self.capacity:
+                self.sum_tree.update(idx_val, max(alpha_priorities[i].item(), self.epsilon))
+
+        self._max_priority = max(self._max_priority, priorities.max().item())
+
+    def _compute_tis_priorities(
+        self,
+        td_errors: torch.Tensor,
+        q_values: torch.Tensor,
+    ) -> torch.Tensor:
+        """TIS = informativeness x reliability, batch-normalised."""
+        informativeness = torch.abs(td_errors)
+        reliability = F.softplus(q_values)
+        info_min, info_max = informativeness.min(), informativeness.max()
+        reli_min, reli_max = reliability.min(), reliability.max()
+        info_range = info_max - info_min
+        reli_range = reli_max - reli_min
+        norm_info = (informativeness - info_min) / info_range if info_range > 1e-8 else torch.ones_like(informativeness)
+        norm_reli = (reliability - reli_min) / reli_range if reli_range > 1e-8 else torch.ones_like(reliability)
+        return norm_info * norm_reli + self.epsilon
+
+    @classmethod
+    def from_lerobot_dataset(
+        cls,
+        lerobot_dataset: LeRobotDataset,
+        device: str = "cuda:0",
+        state_keys: Sequence[str] | None = None,
+        capacity: int | None = None,
+        image_augmentation_function: Callable | None = None,
+        use_drq: bool = True,
+        storage_device: str = "cpu",
+        optimize_memory: bool = False,
+        alpha: float = 0.3,
+        beta_start: float = 0.7,
+        beta_end: float = 1.0,
+        beta_frames: int = 500000,
+        enable_tis: bool = True,
+    ) -> "PrioritizedReplayBuffer":
+        """Create PrioritizedReplayBuffer from a LeRobotDataset."""
+        if capacity is None:
+            capacity = len(lerobot_dataset)
+        if capacity < len(lerobot_dataset):
+            raise ValueError("Capacity must be >= dataset length.")
+
+        buf = cls(
+            capacity=capacity,
+            device=device,
+            state_keys=state_keys,
+            image_augmentation_function=image_augmentation_function,
+            use_drq=use_drq,
+            storage_device=storage_device,
+            optimize_memory=optimize_memory,
+            alpha=alpha,
+            beta_start=beta_start,
+            beta_end=beta_end,
+            beta_frames=beta_frames,
+            enable_tis=enable_tis,
+        )
+
+        list_transition = cls._lerobotdataset_to_transitions(
+            dataset=lerobot_dataset, state_keys=state_keys
+        )
+        if list_transition:
+            first = list_transition[0]
+            first_state = {k: v.to(device) for k, v in first["state"].items()}
+            first_action = first[ACTION].to(device)
+            first_comp = None
+            if "complementary_info" in first and first["complementary_info"] is not None:
+                first_comp = {k: v.to(device) for k, v in first["complementary_info"].items()}
+            buf._initialize_storage(state=first_state, action=first_action, complementary_info=first_comp)
+
+        for data in list_transition:
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    for key, tensor in v.items():
+                        v[key] = tensor.to(storage_device)
+                elif isinstance(v, torch.Tensor):
+                    data[k] = v.to(storage_device)
+            buf.add(
+                state=data["state"],
+                action=data[ACTION],
+                reward=data["reward"],
+                next_state=data["next_state"],
+                done=data["done"],
+                truncated=False,
+                complementary_info=data.get("complementary_info"),
+            )
+
+        return buf
+
+
 # Utility function to guess shapes/dtypes from a tensor
 def guess_feature_info(t, name: str):
     """
@@ -860,5 +1209,15 @@ def concatenate_batch_transitions(
                 dtype = right_val.dtype
                 pad = torch.zeros(left_size, *right_val.shape[1:], device=device, dtype=dtype)
                 left_info[key] = torch.cat([pad, right_val], dim=0)
+
+    # Handle _sample_indices for PER (when both batches have it)
+    if "_sample_indices" in left_batch_transitions and "_sample_indices" in right_batch_transition:
+        left_batch_transitions["_sample_indices"] = torch.cat(
+            [
+                left_batch_transitions["_sample_indices"],
+                right_batch_transition["_sample_indices"],
+            ],
+            dim=0,
+        )
 
     return left_batch_transitions

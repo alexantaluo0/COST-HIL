@@ -66,7 +66,12 @@ from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
 from lerobot.policies.sac.modeling_sac import DISCRETE_DIMENSION_INDEX, SACPolicy
-from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
+from lerobot.rl.buffer import (
+    AdaptiveMixer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+    concatenate_batch_transitions,
+)
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.tensorboard_utils import TensorBoardLogger
 from lerobot.robots import so100_follower  # noqa: F401
@@ -319,26 +324,58 @@ def add_actor_information_and_train(
 
     log_training_info(cfg=cfg, policy=policy)
 
-    replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
-    batch_size = cfg.batch_size
-    # Align with official HIL-SERL: always maintain intervention_buffer for 50/50 RLPD sampling
+    # v0.1.7 BIS optimization: PER + TIS + adaptive mixing (configurable)
+    bis_config = (
+        getattr(cfg, "bis_optimization", None) is not None and cfg.bis_optimization.enabled
+    )
+
+    replay_buffer = initialize_replay_buffer(cfg, device, storage_device, bis_config=bis_config)
+    total_batch_size = cfg.batch_size
     intervention_buffer = None
+    adaptive_mixer = None
+    online_batch_size = total_batch_size // 2
+    offline_batch_size = total_batch_size // 2
+
     if cfg.dataset is not None:
         intervention_buffer = initialize_offline_replay_buffer(
             cfg=cfg,
             device=device,
             storage_device=storage_device,
+            bis_config=bis_config,
         )
+        if bis_config:
+            adaptive_mixer = AdaptiveMixer(
+                total_batch_size=total_batch_size,
+                ema_decay=cfg.bis_optimization.adaptive_mix_ema_decay,
+                min_ratio=cfg.bis_optimization.adaptive_mix_min_ratio,
+                max_ratio=cfg.bis_optimization.adaptive_mix_max_ratio,
+            )
+            online_batch_size, offline_batch_size = adaptive_mixer.get_batch_sizes()
     else:
         # No pre-recorded demo: create empty buffer for online intervention data only
-        intervention_buffer = ReplayBuffer(
-            capacity=cfg.policy.offline_buffer_capacity,
-            device=device,
-            state_keys=cfg.policy.input_features.keys(),
-            storage_device=storage_device,
-            optimize_memory=True,
+        bis_cfg = cfg.bis_optimization if bis_config else None
+        intervention_buffer = (
+            PrioritizedReplayBuffer(
+                capacity=cfg.policy.offline_buffer_capacity,
+                device=device,
+                state_keys=cfg.policy.input_features.keys(),
+                storage_device=storage_device,
+                optimize_memory=True,
+                alpha=bis_cfg.per_alpha,
+                enable_tis=bis_cfg.enable_tis,
+            )
+            if bis_config and bis_cfg is not None
+            else ReplayBuffer(
+                capacity=cfg.policy.offline_buffer_capacity,
+                device=device,
+                state_keys=cfg.policy.input_features.keys(),
+                storage_device=storage_device,
+                optimize_memory=True,
+            )
         )
-    batch_size = batch_size // 2  # 50/50 sampling: half from online, half from intervention (official RLPD)
+    mix_update_interval = (
+        cfg.bis_optimization.mix_update_interval if bis_config and cfg.bis_optimization else 500
+    )
 
     logging.info("Starting learner thread")
     interaction_message = None
@@ -373,6 +410,7 @@ def add_actor_information_and_train(
             device=device,
             shutdown_event=shutdown_event,
             weighted_intervention_config=weighted_intervention_config,
+            bis_config=bis_config,
         )
 
         # Process all available interaction messages sent by the actor server
@@ -389,12 +427,12 @@ def add_actor_information_and_train(
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=online_batch_size, async_prefetch=async_prefetch, queue_size=2
             )
 
-        if intervention_buffer is not None and intervention_iterator is None and len(intervention_buffer) >= batch_size:
+        if intervention_buffer is not None and intervention_iterator is None and len(intervention_buffer) >= offline_batch_size:
             intervention_iterator = intervention_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
+                batch_size=offline_batch_size, async_prefetch=async_prefetch, queue_size=2
             )
 
         time_for_one_optimization_step = time.time()
@@ -441,6 +479,8 @@ def add_actor_information_and_train(
             }
             if sample_weights is not None:
                 forward_batch["sample_weights"] = sample_weights
+            if bis_config:
+                forward_batch["return_per_metadata"] = True
 
             # Use the forward method for critic loss
             critic_output = policy.forward(forward_batch, model="critic")
@@ -453,6 +493,33 @@ def add_actor_information_and_train(
                 parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value
             )
             optimizers["critic"].step()
+
+            # BIS: update priorities for PER
+            if bis_config and "per_sample_td" in critic_output:
+                sample_indices = batch.get("_sample_indices")
+                if sample_indices is not None and hasattr(replay_buffer, "update_priorities"):
+                    per_sample_td = critic_output["per_sample_td"]
+                    q_values = critic_output.get("q_value_mean")
+                    if intervention_iterator is not None:
+                        online_idx = sample_indices[:online_batch_size]
+                        intervention_idx = sample_indices[online_batch_size:]
+                        replay_buffer.update_priorities(
+                            online_idx,
+                            per_sample_td[:online_batch_size],
+                            q_values[:online_batch_size] if q_values is not None else None,
+                        )
+                        if intervention_buffer is not None and hasattr(intervention_buffer, "update_priorities") and len(intervention_idx) > 0:
+                            intervention_buffer.update_priorities(
+                                intervention_idx,
+                                per_sample_td[online_batch_size:],
+                                q_values[online_batch_size:] if q_values is not None else None,
+                            )
+                    else:
+                        replay_buffer.update_priorities(
+                            sample_indices,
+                            per_sample_td,
+                            q_values,
+                        )
 
             # Discrete critic optimization (if available)
             if policy.config.num_discrete_actions is not None:
@@ -510,6 +577,8 @@ def add_actor_information_and_train(
         }
         if sample_weights is not None:
             forward_batch["sample_weights"] = sample_weights
+        if bis_config:
+            forward_batch["return_per_metadata"] = True
 
         critic_output = policy.forward(forward_batch, model="critic")
 
@@ -520,6 +589,38 @@ def add_actor_information_and_train(
             parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value
         ).item()
         optimizers["critic"].step()
+
+        # BIS: update priorities for PER (last UTD step)
+        if bis_config and "per_sample_td" in critic_output:
+            sample_indices = batch.get("_sample_indices")
+            if sample_indices is not None and hasattr(replay_buffer, "update_priorities"):
+                per_sample_td = critic_output["per_sample_td"]
+                q_values = critic_output.get("q_value_mean")
+                if intervention_iterator is not None:
+                    online_idx = sample_indices[:online_batch_size]
+                    intervention_idx = sample_indices[online_batch_size:]
+                    replay_buffer.update_priorities(
+                        online_idx,
+                        per_sample_td[:online_batch_size],
+                        q_values[:online_batch_size] if q_values is not None else None,
+                    )
+                    if intervention_buffer is not None and hasattr(intervention_buffer, "update_priorities") and len(intervention_idx) > 0:
+                        intervention_buffer.update_priorities(
+                            intervention_idx,
+                            per_sample_td[online_batch_size:],
+                            q_values[online_batch_size:] if q_values is not None else None,
+                        )
+                else:
+                    replay_buffer.update_priorities(sample_indices, per_sample_td, q_values)
+        # BIS: update adaptive mixer with loss statistics
+        if bis_config and adaptive_mixer is not None and "per_sample_td" in critic_output and intervention_iterator is not None:
+            online_loss_val = critic_output["per_sample_td"][:online_batch_size].mean().item()
+            offline_loss_val = (
+                critic_output["per_sample_td"][online_batch_size:].mean().item()
+                if critic_output["per_sample_td"].shape[0] > online_batch_size
+                else None
+            )
+            adaptive_mixer.update(online_loss_val, offline_loss_val)
 
         # Compute Q mean and reward mean for logging (no_grad to avoid extra memory)
         with torch.no_grad():
@@ -609,6 +710,14 @@ def add_actor_information_and_train(
                 training_infos["offline_replay_buffer_size"] = len(intervention_buffer)
             training_infos["Optimization step"] = optimization_step
 
+            # BIS: log adaptive mixer and PER metrics
+            if bis_config and adaptive_mixer is not None and adaptive_mixer._initialized:
+                training_infos["adaptive_online_ratio"] = adaptive_mixer.online_ratio
+                training_infos["adaptive_online_loss_ema"] = adaptive_mixer.online_loss_ema
+                training_infos["adaptive_offline_loss_ema"] = adaptive_mixer.offline_loss_ema
+            if bis_config and hasattr(replay_buffer, "beta"):
+                training_infos["per_beta"] = replay_buffer.beta
+
             # Print training metrics to console
             log_parts = [
                 f"loss_critic={training_infos['loss_critic']:.4f}",
@@ -643,6 +752,30 @@ def add_actor_information_and_train(
         optimization_step += 1
         if optimization_step % log_freq == 0:
             logging.info(f"[LEARNER] Number of optimization step: {optimization_step}")
+
+        # BIS: periodically recreate iterators with adaptive batch sizes
+        if (
+            bis_config
+            and adaptive_mixer is not None
+            and adaptive_mixer._initialized
+            and optimization_step > 0
+            and optimization_step % mix_update_interval == 0
+        ):
+            new_online_bs, new_offline_bs = adaptive_mixer.get_batch_sizes()
+            if new_online_bs != online_batch_size or new_offline_bs != offline_batch_size:
+                online_batch_size = new_online_bs
+                offline_batch_size = new_offline_bs
+                online_iterator = replay_buffer.get_iterator(
+                    batch_size=online_batch_size, async_prefetch=async_prefetch, queue_size=2
+                )
+                if intervention_buffer is not None:
+                    intervention_iterator = intervention_buffer.get_iterator(
+                        batch_size=offline_batch_size, async_prefetch=async_prefetch, queue_size=2
+                    )
+                logging.info(
+                    f"[LEARNER] Adaptive mixer updated: online_bs={online_batch_size}, "
+                    f"offline_bs={offline_batch_size}, ratio={adaptive_mixer.online_ratio:.3f}"
+                )
 
         # Save checkpoint at specified intervals
         if saving_checkpoint and (optimization_step % save_freq == 0 or optimization_step == online_steps):
@@ -989,8 +1122,8 @@ def log_training_info(cfg: TrainRLServerPipelineConfig, policy: nn.Module) -> No
 
 
 def initialize_replay_buffer(
-    cfg: TrainRLServerPipelineConfig, device: str, storage_device: str
-) -> ReplayBuffer:
+    cfg: TrainRLServerPipelineConfig, device: str, storage_device: str, bis_config: bool = False
+) -> ReplayBuffer | PrioritizedReplayBuffer:
     """
     Initialize a replay buffer, either empty or from a dataset if resuming.
 
@@ -998,11 +1131,26 @@ def initialize_replay_buffer(
         cfg (TrainRLServerPipelineConfig): Training configuration
         device (str): Device to store tensors on
         storage_device (str): Device for storage optimization
+        bis_config (bool): When True, use PrioritizedReplayBuffer (BIS PER)
 
     Returns:
-        ReplayBuffer: Initialized replay buffer
+        ReplayBuffer | PrioritizedReplayBuffer: Initialized replay buffer
     """
+    bis_cfg = getattr(cfg, "bis_optimization", None) if bis_config else None
     if not cfg.resume:
+        if bis_config and bis_cfg is not None:
+            return PrioritizedReplayBuffer(
+                capacity=cfg.policy.online_buffer_capacity,
+                device=device,
+                state_keys=cfg.policy.input_features.keys(),
+                storage_device=storage_device,
+                optimize_memory=True,
+                alpha=bis_cfg.per_alpha,
+                beta_start=bis_cfg.per_beta_start,
+                beta_end=bis_cfg.per_beta_end,
+                beta_frames=bis_cfg.per_beta_frames,
+                enable_tis=bis_cfg.enable_tis,
+            )
         return ReplayBuffer(
             capacity=cfg.policy.online_buffer_capacity,
             device=device,
@@ -1022,6 +1170,20 @@ def initialize_replay_buffer(
         repo_id=repo_id,
         root=dataset_path,
     )
+    if bis_config and bis_cfg is not None:
+        return PrioritizedReplayBuffer.from_lerobot_dataset(
+            lerobot_dataset=dataset,
+            capacity=cfg.policy.online_buffer_capacity,
+            device=device,
+            state_keys=cfg.policy.input_features.keys(),
+            optimize_memory=True,
+            storage_device=storage_device,
+            alpha=bis_cfg.per_alpha,
+            beta_start=bis_cfg.per_beta_start,
+            beta_end=bis_cfg.per_beta_end,
+            beta_frames=bis_cfg.per_beta_frames,
+            enable_tis=bis_cfg.enable_tis,
+        )
     return ReplayBuffer.from_lerobot_dataset(
         lerobot_dataset=dataset,
         capacity=cfg.policy.online_buffer_capacity,
@@ -1035,7 +1197,8 @@ def initialize_offline_replay_buffer(
     cfg: TrainRLServerPipelineConfig,
     device: str,
     storage_device: str,
-) -> ReplayBuffer:
+    bis_config: bool = False,
+) -> ReplayBuffer | PrioritizedReplayBuffer:
     """
     Initialize an offline replay buffer from a dataset.
 
@@ -1043,9 +1206,10 @@ def initialize_offline_replay_buffer(
         cfg (TrainRLServerPipelineConfig): Training configuration
         device (str): Device to store tensors on
         storage_device (str): Device for storage optimization
+        bis_config (bool): When True, use PrioritizedReplayBuffer (BIS PER)
 
     Returns:
-        ReplayBuffer: Initialized offline replay buffer
+        ReplayBuffer | PrioritizedReplayBuffer: Initialized offline replay buffer
     """
     if not cfg.resume:
         logging.info("make_dataset offline buffer")
@@ -1058,15 +1222,31 @@ def initialize_offline_replay_buffer(
             root=dataset_offline_path,
         )
 
+    bis_cfg = getattr(cfg, "bis_optimization", None) if bis_config else None
     logging.info("Convert to a offline replay buffer")
-    offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
-        offline_dataset,
-        device=device,
-        state_keys=cfg.policy.input_features.keys(),
-        storage_device=storage_device,
-        optimize_memory=True,
-        capacity=cfg.policy.offline_buffer_capacity,
-    )
+    if bis_config and bis_cfg is not None:
+        offline_replay_buffer = PrioritizedReplayBuffer.from_lerobot_dataset(
+            lerobot_dataset=offline_dataset,
+            device=device,
+            state_keys=cfg.policy.input_features.keys(),
+            storage_device=storage_device,
+            optimize_memory=True,
+            capacity=cfg.policy.offline_buffer_capacity,
+            alpha=bis_cfg.per_alpha,
+            beta_start=bis_cfg.per_beta_start,
+            beta_end=bis_cfg.per_beta_end,
+            beta_frames=bis_cfg.per_beta_frames,
+            enable_tis=bis_cfg.enable_tis,
+        )
+    else:
+        offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
+            offline_dataset,
+            device=device,
+            state_keys=cfg.policy.input_features.keys(),
+            storage_device=storage_device,
+            optimize_memory=True,
+            capacity=cfg.policy.offline_buffer_capacity,
+        )
     return offline_replay_buffer
 
 
@@ -1189,6 +1369,7 @@ def process_transitions(
     device: str,
     shutdown_event: any,
     weighted_intervention_config=None,
+    bis_config: bool = False,
 ):
     """Process all available transitions from the queue.
 
@@ -1199,6 +1380,7 @@ def process_transitions(
         device: Device to move transitions to
         shutdown_event: Event to signal shutdown
         weighted_intervention_config: Hypothesis 2 config for adding intervention_quality
+        bis_config: When True, use priority_boost for intervention transitions (BIS PER)
     """
     while not transition_queue.empty() and not shutdown_event.is_set():
         transition_list = transition_queue.get()
@@ -1241,13 +1423,21 @@ def process_transitions(
                     comp["intervention_quality"] = torch.tensor([1.0], device=device)
                     transition["complementary_info"] = comp
 
-            replay_buffer.add(**transition)
+            is_intervention = transition.get("complementary_info", {}).get(
+                TeleopEvents.IS_INTERVENTION.value, False
+            )
+            if bis_config and hasattr(replay_buffer, "sum_tree"):
+                priority_boost = 1.2 if is_intervention else 1.0
+                replay_buffer.add(**transition, priority_boost=priority_boost)
+            else:
+                replay_buffer.add(**transition)
 
             # Add to intervention buffer if it's an intervention (align with official HIL-SERL: always)
-            if intervention_buffer is not None and transition.get("complementary_info", {}).get(
-                TeleopEvents.IS_INTERVENTION.value, False
-            ):
-                intervention_buffer.add(**transition)
+            if intervention_buffer is not None and is_intervention:
+                if bis_config and hasattr(intervention_buffer, "sum_tree"):
+                    intervention_buffer.add(**transition, priority_boost=1.2)
+                else:
+                    intervention_buffer.add(**transition)
                 # logging.info(
                 #     f"[LEARNER] Intervention detected! Added to intervention buffer. "
                 #     f"Intervention buffer size: {len(intervention_buffer)}/{intervention_buffer.capacity}"

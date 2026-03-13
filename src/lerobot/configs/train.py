@@ -26,6 +26,7 @@ from lerobot import envs
 from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.hil import (
+    BISOptimizationConfig,
     InterventionDebounceConfig,
     InterventionSchedulerConfig,
     WeightedInterventionConfig,
@@ -221,3 +222,5 @@ class TrainRLServerPipelineConfig(TrainPipelineConfig):
     intervention_debounce: InterventionDebounceConfig | None = None
     # Hypothesis 2: Weighted intervention data fusion (separate for ablation)
     weighted_intervention: WeightedInterventionConfig | None = None
+    # v0.1.7 BIS optimization: PER + TIS + adaptive online/offline mixing
+    bis_optimization: BISOptimizationConfig | None = None

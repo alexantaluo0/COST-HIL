@@ -183,7 +183,7 @@
         },
         "actor_learner_config": {
             "learner_host": "127.0.0.1",
-            "learner_port": 50051,
+            "learner_port": 50052,
             "steps_per_update": 50,
             "policy_parameters_push_frequency": 4
         },
@@ -203,7 +203,7 @@
             "enabled": true,
             "cooldown_steps": 10,
             "penalty_window_steps": 10,
-            "switching_penalty": -0.005
+            "switching_penalty": -0.002
         }
     },
     "env": {
@@ -296,8 +296,8 @@
     "intervention_scheduler": {
         "enabled": true,
         "uncertainty_threshold_high_start": 0.5,
-        "uncertainty_threshold_high_end": 0.8,
-        "uncertainty_threshold_ramp_end_step": 10000,
+        "uncertainty_threshold_high_end": 1.0,
+        "uncertainty_threshold_ramp_end_step": 15000,
         "uncertainty_threshold_low": 0.1,
         "min_steps_between_interventions": 10,
         "intervention_cost": -0.01,
@@ -309,5 +309,17 @@
         "enabled": false,
         "intervention_quality_key": "intervention_quality",
         "min_intervention_weight": 0.1
+    },
+    "bis_optimization": {
+        "enabled": true,
+        "per_alpha": 0.3,
+        "per_beta_start": 0.7,
+        "per_beta_end": 1.0,
+        "per_beta_frames": 10000,
+        "enable_tis": true,
+        "adaptive_mix_ema_decay": 0.99,
+        "adaptive_mix_min_ratio": 0.2,
+        "adaptive_mix_max_ratio": 0.8,
+        "mix_update_interval": 500
     }
 }
