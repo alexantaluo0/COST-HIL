@@ -27,6 +27,7 @@ from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.hil import (
     BISOptimizationConfig,
+    ImageAugmentationConfig,
     InterventionDebounceConfig,
     InterventionSchedulerConfig,
     WeightedInterventionConfig,
@@ -224,3 +225,5 @@ class TrainRLServerPipelineConfig(TrainPipelineConfig):
     weighted_intervention: WeightedInterventionConfig | None = None
     # v0.1.7 BIS optimization: PER + TIS + adaptive online/offline mixing
     bis_optimization: BISOptimizationConfig | None = None
+    # Image augmentation: flip and crop switches for ablation
+    augmentation: ImageAugmentationConfig | None = None

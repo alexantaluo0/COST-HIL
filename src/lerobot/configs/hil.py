@@ -56,6 +56,15 @@ class WeightedInterventionConfig:
 
 
 @dataclass
+class ImageAugmentationConfig:
+    """Image augmentation switches for ablation experiments."""
+
+    enable_flip: bool = True  # Random horizontal flip (with action sync)
+    enable_crop: bool = True  # Random crop + resize
+    crop_ratio_range: tuple[float, float] = (0.95, 1.0)  # keep 95%~100%, i.e. crop 0~5%
+
+
+@dataclass
 class BISOptimizationConfig:
     """v0.1.7 BIS-inspired data efficiency: PER + TIS + adaptive mixing.
 

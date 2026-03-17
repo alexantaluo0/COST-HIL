@@ -28,6 +28,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGE, REWARD
 from lerobot.utils.transition import Transition
 
+from .augmentation import (
+    GeometricAugmentationConfig,
+    apply_geometric_augmentation,
+)
+
 
 class BatchTransition(TypedDict):
     state: dict[str, torch.Tensor]
@@ -88,6 +93,7 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        augmentation_config: GeometricAugmentationConfig | None = None,
     ):
         """
         Replay buffer for storing transitions.
@@ -123,11 +129,9 @@ class ReplayBuffer:
         # If no state_keys provided, default to an empty list
         self.state_keys = state_keys if state_keys is not None else []
 
+        self.augmentation_config = augmentation_config
         self.image_augmentation_function = image_augmentation_function
-
-        if image_augmentation_function is None:
-            # Use eager mode for image augmentation to avoid torch.compile / Triton dependency
-            # (torch.compile can fail on Windows or without Triton installed)
+        if augmentation_config is None and image_augmentation_function is None:
             self.image_augmentation_function = functools.partial(random_shift, pad=4)
         self.use_drq = use_drq
 
@@ -261,29 +265,35 @@ class ReplayBuffer:
                 next_idx = (idx + 1) % self.capacity
                 batch_next_state[key] = self.states[key][next_idx].to(self.device)
 
-        # Apply image augmentation in a batched way if needed
-        if self.use_drq and image_keys:
-            # Concatenate all images from state and next_state
-            all_images = []
-            for key in image_keys:
-                all_images.append(batch_state[key])
-                all_images.append(batch_next_state[key])
-
-            # Optimization: Batch all images and apply augmentation once
-            all_images_tensor = torch.cat(all_images, dim=0)
-            augmented_images = self.image_augmentation_function(all_images_tensor)
-
-            # Split the augmented images back to their sources
-            for i, key in enumerate(image_keys):
-                # Calculate offsets for the current image key:
-                # For each key, we have 2*batch_size images (batch_size for states, batch_size for next_states)
-                # States start at index i*2*batch_size and take up batch_size slots
-                batch_state[key] = augmented_images[i * 2 * batch_size : (i * 2 + 1) * batch_size]
-                # Next states start after the states at index (i*2+1)*batch_size and also take up batch_size slots
-                batch_next_state[key] = augmented_images[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
-
-        # Sample other tensors
+        # Sample actions before augmentation (needed for action transform when using geom aug)
         batch_actions = self.actions[idx].to(self.device)
+
+        # Apply image augmentation (and action transform when using geometric aug)
+        if self.use_drq and image_keys:
+            if self.augmentation_config is not None:
+                batch_state, batch_next_state, batch_actions = apply_geometric_augmentation(
+                    batch_state,
+                    batch_next_state,
+                    batch_actions,
+                    image_keys,
+                    self.augmentation_config,
+                )
+            else:
+                all_images = []
+                for key in image_keys:
+                    all_images.append(batch_state[key])
+                    all_images.append(batch_next_state[key])
+                all_images_tensor = torch.cat(all_images, dim=0)
+                augmented_images = self.image_augmentation_function(all_images_tensor)
+                for i, key in enumerate(image_keys):
+                    batch_state[key] = augmented_images[
+                        i * 2 * batch_size : (i * 2 + 1) * batch_size
+                    ]
+                    batch_next_state[key] = augmented_images[
+                        (i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size
+                    ]
+
+        # Sample other tensors (batch_actions already loaded above)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -424,6 +434,7 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        augmentation_config: GeometricAugmentationConfig | None = None,
     ) -> "ReplayBuffer":
         """
         Convert a LeRobotDataset into a ReplayBuffer.
@@ -439,6 +450,8 @@ class ReplayBuffer:
             use_drq (bool): Whether to use DrQ image augmentation when sampling.
             storage_device (str): Device for storing tensor data. Using "cpu" saves GPU memory.
             optimize_memory (bool): If True, reduces memory usage by not duplicating state data.
+            augmentation_config (GeometricAugmentationConfig | None): Config for geometric augmentation
+                with action sync. If provided, replaces image_augmentation_function when sampling.
 
         Returns:
             ReplayBuffer: The replay buffer with dataset transitions.
@@ -460,6 +473,7 @@ class ReplayBuffer:
             use_drq=use_drq,
             storage_device=storage_device,
             optimize_memory=optimize_memory,
+            augmentation_config=augmentation_config,
         )
 
         # Convert dataset to transitions
@@ -951,18 +965,32 @@ class PrioritizedReplayBuffer(ReplayBuffer):
                 next_idx = (idx + 1) % self.capacity
                 batch_next_state[key] = self.states[key][next_idx].to(self.device)
 
-        if self.use_drq and image_keys:
-            all_images = []
-            for key in image_keys:
-                all_images.append(batch_state[key])
-                all_images.append(batch_next_state[key])
-            all_images_tensor = torch.cat(all_images, dim=0)
-            augmented = self.image_augmentation_function(all_images_tensor)
-            for i, key in enumerate(image_keys):
-                batch_state[key] = augmented[i * 2 * batch_size : (i * 2 + 1) * batch_size]
-                batch_next_state[key] = augmented[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
-
         batch_actions = self.actions[idx].to(self.device)
+
+        if self.use_drq and image_keys:
+            if self.augmentation_config is not None:
+                batch_state, batch_next_state, batch_actions = apply_geometric_augmentation(
+                    batch_state,
+                    batch_next_state,
+                    batch_actions,
+                    image_keys,
+                    self.augmentation_config,
+                )
+            else:
+                all_images = []
+                for key in image_keys:
+                    all_images.append(batch_state[key])
+                    all_images.append(batch_next_state[key])
+                all_images_tensor = torch.cat(all_images, dim=0)
+                augmented = self.image_augmentation_function(all_images_tensor)
+                for i, key in enumerate(image_keys):
+                    batch_state[key] = augmented[
+                        i * 2 * batch_size : (i * 2 + 1) * batch_size
+                    ]
+                    batch_next_state[key] = augmented[
+                        (i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size
+                    ]
+
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -1036,6 +1064,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        augmentation_config: GeometricAugmentationConfig | None = None,
         alpha: float = 0.3,
         beta_start: float = 0.7,
         beta_end: float = 1.0,
@@ -1056,6 +1085,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             use_drq=use_drq,
             storage_device=storage_device,
             optimize_memory=optimize_memory,
+            augmentation_config=augmentation_config,
             alpha=alpha,
             beta_start=beta_start,
             beta_end=beta_end,

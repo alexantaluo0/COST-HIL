@@ -52,6 +52,7 @@ import time
 from functools import lru_cache
 from queue import Empty
 
+import numpy as np
 import grpc
 import torch
 from torch import nn
@@ -102,6 +103,90 @@ from .hypothesis1 import (
     estimate_actor_entropy_uncertainty,
     estimate_value_no_intervention,
 )
+from lerobot.utils.constants import OBS_IMAGES
+
+# When OpenCV has no GUI support, use matplotlib for real-time display.
+_display_camera_backend: str | None = None  # "cv2" | "mpl" | None
+_display_camera_mpl_axes: dict = {}
+
+
+def _display_camera_feed(transition, cfg: TrainRLServerPipelineConfig) -> None:
+    """Display camera feeds in real-time during training when display_cameras is enabled.
+
+    Shows processed (cropped/resized) images from observation.
+    Uses cv2 when available, falls back to matplotlib when OpenCV has no GUI support.
+    """
+    global _display_camera_backend, _display_camera_mpl_axes
+    obs_config = getattr(getattr(cfg.env.processor, "observation", None), "display_cameras", False)
+    if not obs_config:
+        return
+    import cv2
+
+    def _to_rgb_uint8(img_np):
+        img_np = np.asarray(img_np)
+        if img_np.dtype.kind == "f":
+            img_np = (img_np * 255).clip(0, 255).astype("uint8")
+        elif img_np.dtype != "uint8":
+            img_np = img_np.astype("uint8")
+        return img_np
+
+    def _show_cv2(win_name, img_rgb):
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        cv2.imshow(win_name, img_bgr)
+
+    def _show_mpl(win_name, img_rgb):
+        import matplotlib.pyplot as plt
+
+        if win_name not in _display_camera_mpl_axes:
+            fig, ax = plt.subplots()
+            fig.canvas.manager.set_window_title(win_name)
+            ax.axis("off")
+            im = ax.imshow(img_rgb)
+            _display_camera_mpl_axes[win_name] = (fig, ax, im)
+            plt.ion()
+            plt.show(block=False)
+        else:
+            _, ax, im = _display_camera_mpl_axes[win_name]
+            im.set_data(img_rgb)
+            ax.figure.canvas.draw()
+        plt.pause(0.001)
+
+    def _show(win_name, img_rgb):
+        global _display_camera_backend
+        if _display_camera_backend == "mpl":
+            _show_mpl(win_name, img_rgb)
+        else:
+            try:
+                _show_cv2(win_name, img_rgb)
+                if _display_camera_backend is None:
+                    _display_camera_backend = "cv2"
+            except cv2.error:
+                if _display_camera_backend is None:
+                    _display_camera_backend = "mpl"
+                    logging.warning(
+                        "[ACTOR] OpenCV has no GUI support. Using matplotlib for camera display."
+                    )
+                _show_mpl(win_name, img_rgb)
+
+    obs = transition.get(TransitionKey.OBSERVATION, {})
+    for key in [k for k in obs if k.startswith(f"{OBS_IMAGES}.")]:
+        value = obs[key]
+        if not isinstance(value, torch.Tensor):
+            continue
+        img = value.detach().cpu()
+        if img.ndim == 4:
+            img = img.squeeze(0)
+        if img.ndim != 3:
+            continue
+        img_np = img.permute(1, 2, 0).numpy()
+        img_rgb = _to_rgb_uint8(img_np)
+        _show(key, img_rgb)
+
+    if _display_camera_backend == "cv2":
+        try:
+            cv2.waitKey(1)
+        except cv2.error:
+            pass
 
 
 # Main entry point
@@ -553,6 +638,9 @@ def act_with_policy(
             # Update transition for next iteration
             transition = new_transition
 
+            # 实时显示摄像头画面（若启用）
+            _display_camera_feed(transition, cfg)
+
             if done or truncated:
                 logging.info(
                     f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}, Episode steps: {episode_total_steps}"
@@ -630,6 +718,19 @@ def act_with_policy(
     finally:
         if intervention_ui_prompt is not None:
             intervention_ui_prompt.close()
+        if getattr(getattr(cfg.env.processor, "observation", None), "display_cameras", False):
+            if _display_camera_backend == "mpl" and _display_camera_mpl_axes:
+                import matplotlib.pyplot as plt
+
+                for _fig, _ax, _ in _display_camera_mpl_axes.values():
+                    plt.close(_fig)
+            else:
+                try:
+                    import cv2
+
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
 
 
 #  Communication Functions - Group all gRPC/messaging functions

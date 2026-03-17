@@ -66,6 +66,21 @@ from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
 from lerobot.policies.sac.modeling_sac import DISCRETE_DIMENSION_INDEX, SACPolicy
+from lerobot.rl.augmentation import GeometricAugmentationConfig
+
+
+def _get_augmentation_config(cfg: TrainRLServerPipelineConfig) -> GeometricAugmentationConfig:
+    """Build GeometricAugmentationConfig from train config; use augmentation section for enable_flip/enable_crop."""
+    aug_cfg = getattr(cfg, "augmentation", None)
+    if aug_cfg is not None:
+        return GeometricAugmentationConfig(
+            enable_flip=aug_cfg.enable_flip,
+            enable_crop=aug_cfg.enable_crop,
+            crop_ratio_range=getattr(aug_cfg, "crop_ratio_range", (0.95, 1.0)),
+        )
+    return GeometricAugmentationConfig()
+
+
 from lerobot.rl.buffer import (
     AdaptiveMixer,
     PrioritizedReplayBuffer,
@@ -330,6 +345,12 @@ def add_actor_information_and_train(
     )
 
     replay_buffer = initialize_replay_buffer(cfg, device, storage_device, bis_config=bis_config)
+    aug_cfg = _get_augmentation_config(cfg)
+    logging.info(
+        "[LEARNER] Image augmentation: enable_flip=%s, enable_crop=%s",
+        aug_cfg.enable_flip,
+        aug_cfg.enable_crop,
+    )
     total_batch_size = cfg.batch_size
     intervention_buffer = None
     adaptive_mixer = None
@@ -354,6 +375,7 @@ def add_actor_information_and_train(
     else:
         # No pre-recorded demo: create empty buffer for online intervention data only
         bis_cfg = cfg.bis_optimization if bis_config else None
+        default_aug_config = _get_augmentation_config(cfg)
         intervention_buffer = (
             PrioritizedReplayBuffer(
                 capacity=cfg.policy.offline_buffer_capacity,
@@ -361,6 +383,7 @@ def add_actor_information_and_train(
                 state_keys=cfg.policy.input_features.keys(),
                 storage_device=storage_device,
                 optimize_memory=True,
+                augmentation_config=default_aug_config,
                 alpha=bis_cfg.per_alpha,
                 enable_tis=bis_cfg.enable_tis,
             )
@@ -371,6 +394,7 @@ def add_actor_information_and_train(
                 state_keys=cfg.policy.input_features.keys(),
                 storage_device=storage_device,
                 optimize_memory=True,
+                augmentation_config=default_aug_config,
             )
         )
     mix_update_interval = (
@@ -1137,6 +1161,7 @@ def initialize_replay_buffer(
         ReplayBuffer | PrioritizedReplayBuffer: Initialized replay buffer
     """
     bis_cfg = getattr(cfg, "bis_optimization", None) if bis_config else None
+    default_aug_config = _get_augmentation_config(cfg)
     if not cfg.resume:
         if bis_config and bis_cfg is not None:
             return PrioritizedReplayBuffer(
@@ -1145,6 +1170,7 @@ def initialize_replay_buffer(
                 state_keys=cfg.policy.input_features.keys(),
                 storage_device=storage_device,
                 optimize_memory=True,
+                augmentation_config=default_aug_config,
                 alpha=bis_cfg.per_alpha,
                 beta_start=bis_cfg.per_beta_start,
                 beta_end=bis_cfg.per_beta_end,
@@ -1157,6 +1183,7 @@ def initialize_replay_buffer(
             state_keys=cfg.policy.input_features.keys(),
             storage_device=storage_device,
             optimize_memory=True,
+            augmentation_config=default_aug_config,
         )
 
     logging.info("Resume training load the online dataset")
@@ -1178,6 +1205,7 @@ def initialize_replay_buffer(
             state_keys=cfg.policy.input_features.keys(),
             optimize_memory=True,
             storage_device=storage_device,
+            augmentation_config=default_aug_config,
             alpha=bis_cfg.per_alpha,
             beta_start=bis_cfg.per_beta_start,
             beta_end=bis_cfg.per_beta_end,
@@ -1190,6 +1218,7 @@ def initialize_replay_buffer(
         device=device,
         state_keys=cfg.policy.input_features.keys(),
         optimize_memory=True,
+        augmentation_config=default_aug_config,
     )
 
 
@@ -1223,6 +1252,7 @@ def initialize_offline_replay_buffer(
         )
 
     bis_cfg = getattr(cfg, "bis_optimization", None) if bis_config else None
+    default_aug_config = _get_augmentation_config(cfg)
     logging.info("Convert to a offline replay buffer")
     if bis_config and bis_cfg is not None:
         offline_replay_buffer = PrioritizedReplayBuffer.from_lerobot_dataset(
@@ -1232,6 +1262,7 @@ def initialize_offline_replay_buffer(
             storage_device=storage_device,
             optimize_memory=True,
             capacity=cfg.policy.offline_buffer_capacity,
+            augmentation_config=default_aug_config,
             alpha=bis_cfg.per_alpha,
             beta_start=bis_cfg.per_beta_start,
             beta_end=bis_cfg.per_beta_end,
@@ -1246,6 +1277,7 @@ def initialize_offline_replay_buffer(
             storage_device=storage_device,
             optimize_memory=True,
             capacity=cfg.policy.offline_buffer_capacity,
+            augmentation_config=default_aug_config,
         )
     return offline_replay_buffer
 

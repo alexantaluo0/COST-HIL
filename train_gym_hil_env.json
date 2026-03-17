@@ -287,7 +287,7 @@
                 ]
             },
             "observation": {
-                "display_cameras": false,
+                "display_cameras": true,
                 "add_joint_velocity_to_observation": true,
                 "add_current_to_observation": false
             }
@@ -296,8 +296,8 @@
     "intervention_scheduler": {
         "enabled": true,
         "uncertainty_threshold_high_start": 0.5,
-        "uncertainty_threshold_high_end": 1.0,
-        "uncertainty_threshold_ramp_end_step": 15000,
+        "uncertainty_threshold_high_end": 0.8,
+        "uncertainty_threshold_ramp_end_step": 10000,
         "uncertainty_threshold_low": 0.1,
         "min_steps_between_interventions": 10,
         "intervention_cost": -0.01,
@@ -316,10 +316,15 @@
         "per_beta_start": 0.7,
         "per_beta_end": 1.0,
         "per_beta_frames": 10000,
-        "enable_tis": true,
+        "enable_tis": false,
         "adaptive_mix_ema_decay": 0.99,
         "adaptive_mix_min_ratio": 0.2,
         "adaptive_mix_max_ratio": 0.8,
         "mix_update_interval": 500
+    },
+    "augmentation": {
+        "enable_flip": false,
+        "enable_crop": true,
+        "crop_ratio_range": [0.95, 1.0]
     }
 }
