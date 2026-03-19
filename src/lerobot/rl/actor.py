@@ -648,22 +648,40 @@ def act_with_policy(
 
                 update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
 
-                if len(list_transition_to_send_to_learner) > 0:
+                # 未及时干预: 提示干预后，用户未按 Space（键盘）或 RB（罗技手柄）即回合结束
+                # 此类 episode 的数据不存储到 buffer，也不参与 episodic reward、intervention rate 等任何指标计算
+                episode_untimely_intervention = (
+                    intervention_scheduler is not None
+                    and suggested_intervention_prev
+                    and not episode_intervention
+                )
+
+                if not episode_untimely_intervention and len(list_transition_to_send_to_learner) > 0:
                     push_transitions_to_transport_queue(
                         transitions=list_transition_to_send_to_learner,
                         transitions_queue=transitions_queue,
                     )
-                    list_transition_to_send_to_learner = []
+                elif episode_untimely_intervention and len(list_transition_to_send_to_learner) > 0:
+                    logging.info(
+                        "[ACTOR] Episode untimely intervention: discarding %d transitions (not stored to buffer)",
+                        len(list_transition_to_send_to_learner),
+                    )
+                list_transition_to_send_to_learner = []
 
                 stats = get_frequency_stats(policy_timer)
                 policy_timer.reset()
 
-                # Calculate intervention rate
+                # Calculate intervention rate (only for timely episodes)
                 intervention_rate = 0.0
                 if episode_total_steps > 0:
                     intervention_rate = episode_intervention_steps / episode_total_steps
 
-                # Send episodic reward to the learner
+                # HIL-SERL 论文指标：成功率、周期时间（秒）
+                episode_success = 1 if sum_reward_episode > 0 else 0
+                fps = cfg.env.fps if cfg.env and cfg.env.fps else 30
+                episode_duration_sec = episode_total_steps / fps if fps > 0 else 0.0
+
+                # Send episodic reward to the learner (include flag for learner to filter metrics)
                 interactions_queue.put(
                     python_object_to_bytes(
                         {
@@ -671,6 +689,9 @@ def act_with_policy(
                             "Interaction step": interaction_step,
                             "Episode intervention": int(episode_intervention),
                             "Intervention rate": intervention_rate,
+                            "episode_untimely_intervention": episode_untimely_intervention,
+                            "Episode success": episode_success,
+                            "Episode duration (s)": episode_duration_sec,
                             **stats,
                         }
                     )

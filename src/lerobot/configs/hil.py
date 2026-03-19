@@ -65,6 +65,13 @@ class ImageAugmentationConfig:
 
 
 @dataclass
+class HILMetricsConfig:
+    """HIL-SERL 论文风格的可视化：成功率、周期时间、干预率的滑动平均。"""
+
+    slide_window_size: int = 20  # 连续 N 回合的滑动窗口，与论文一致
+
+
+@dataclass
 class BISOptimizationConfig:
     """v0.1.7 BIS-inspired data efficiency: PER + TIS + adaptive mixing.
 

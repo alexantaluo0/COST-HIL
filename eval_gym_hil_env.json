@@ -59,7 +59,7 @@
     },
     "policy": {
         "type": "sac",
-        "pretrained_path": "D:/code/lerobot-hilserl/outputs/train/2026-03-11/19-38-29_default/checkpoints/0020000/pretrained_model",
+        "pretrained_path": "D:/code/lerobot-hilserl/outputs/train/2026-03-18/17-59-34_default/checkpoints/010000/pretrained_model",
         "n_obs_steps": 1,
         "repo_id": "alexanta/policy_panda_pick_gamepad_eval",
         "normalization_mapping": {

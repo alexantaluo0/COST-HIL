@@ -48,6 +48,7 @@ import logging
 import os
 import shutil
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from pprint import pformat
@@ -419,6 +420,17 @@ def add_actor_information_and_train(
     online_iterator = None
     intervention_iterator = None
 
+    # HIL-SERL 论文风格：滑动窗口状态（成功率、周期时间、干预率）
+    hil_metrics_config = getattr(cfg, "hil_metrics", None)
+    slide_state = (
+        _make_slide_state(hil_metrics_config.slide_window_size) if hil_metrics_config else None
+    )
+    if hil_metrics_config:
+        logging.info(
+            "[LEARNER] HIL-SERL 论文风格可视化已启用: slide_window_size=%d",
+            hil_metrics_config.slide_window_size,
+        )
+
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
     while True:
         # Exit the training loop if shutdown is requested
@@ -443,6 +455,8 @@ def add_actor_information_and_train(
             interaction_step_shift=interaction_step_shift,
             tensorboard_logger=tensorboard_logger,
             shutdown_event=shutdown_event,
+            hil_metrics_config=hil_metrics_config,
+            slide_state=slide_state,
         )
 
         # Wait until the replay buffer has enough samples to start training
@@ -762,16 +776,7 @@ def add_actor_information_and_train(
 
         logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
 
-        # Log optimization frequency
-        if tensorboard_logger:
-            tensorboard_logger.log_dict(
-                {
-                    "Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
-                    "Optimization step": optimization_step,
-                },
-                mode="train",
-                custom_step_key="Optimization step",
-            )
+        # Optimization frequency: only log to console, not TensorBoard
 
         optimization_step += 1
         if optimization_step % log_freq == 0:
@@ -1379,17 +1384,74 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     parameters_queue.put(state_bytes)
 
 
+def _make_slide_state(window_size: int) -> dict:
+    """创建 HIL-SERL 论文风格的滑动窗口状态。"""
+    return {
+        "success": deque(maxlen=window_size),
+        "duration_sec": deque(maxlen=window_size),
+        "intervention_rate": deque(maxlen=window_size),
+    }
+
+
 def process_interaction_message(
-    message, interaction_step_shift: int, tensorboard_logger: TensorBoardLogger | None = None
+    message,
+    interaction_step_shift: int,
+    tensorboard_logger: TensorBoardLogger | None = None,
+    hil_metrics_config=None,
+    slide_state: dict | None = None,
 ):
     """Process a single interaction message with consistent handling."""
     message = bytes_to_python_object(message)
     # Shift interaction step for consistency with checkpointed state
     message["Interaction step"] += interaction_step_shift
 
-    # Log if logger available
+    # 未及时干预的 episode: 提示干预后未按 Space/RB 即回合结束，不参与 episodic reward、intervention rate 等指标
+    episode_untimely_intervention = message.get("episode_untimely_intervention", False)
+    if episode_untimely_intervention:
+        logging.debug(
+            "[LEARNER] Episode untimely intervention: skipping buffer storage and metrics "
+            "(Episodic reward, Intervention rate, Episode intervention)"
+        )
+
+    # HIL-SERL 论文风格：连续 N 回合滑动平均（仅对及时干预的 episode 计入）
+    if (
+        not episode_untimely_intervention
+        and hil_metrics_config is not None
+        and slide_state is not None
+    ):
+        success = message.get("Episode success", 1 if message.get("Episodic reward", 0) > 0 else 0)
+        duration = message.get("Episode duration (s)", 0.0)
+        interv_rate = message.get("Intervention rate", 0.0)
+        slide_state["success"].append(success)
+        slide_state["duration_sec"].append(duration)
+        slide_state["intervention_rate"].append(interv_rate)
+        n = len(slide_state["success"])
+        msg_slide = dict(message)
+        msg_slide["Success rate (slide)"] = sum(slide_state["success"]) / n
+        msg_slide["Cycle time (s) (slide)"] = sum(slide_state["duration_sec"]) / n
+        msg_slide["Intervention rate (slide)"] = sum(slide_state["intervention_rate"]) / n
+        message = msg_slide
+
     if tensorboard_logger:
-        tensorboard_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+        # 始终排除的 key：内部控制标志 + 原始逐 episode 噪音指标（用滑动平均版本代替）
+        _always_exclude = (
+            "episode_untimely_intervention",
+            "Episodic reward",
+            "Episode intervention",
+            "Intervention rate",
+            "Episode success",
+            "Episode duration (s)",
+            "Policy frequency [Hz]",
+            "Policy frequency 90th-p [Hz]",
+        )
+        if episode_untimely_intervention:
+            # 未及时干预：只保留 Interaction step（用于对齐 x 轴）
+            metrics_to_log = {k: v for k, v in message.items()
+                              if k not in _always_exclude and k == "Interaction step"}
+        else:
+            metrics_to_log = {k: v for k, v in message.items() if k not in _always_exclude}
+        if metrics_to_log and not (len(metrics_to_log) == 1 and "Interaction step" in metrics_to_log):
+            tensorboard_logger.log_dict(d=metrics_to_log, mode="train", custom_step_key="Interaction step")
 
     return message
 
@@ -1480,6 +1542,8 @@ def process_interaction_messages(
     interaction_step_shift: int,
     tensorboard_logger: TensorBoardLogger | None,
     shutdown_event: any,
+    hil_metrics_config=None,
+    slide_state: dict | None = None,
 ) -> dict | None:
     """Process all available interaction messages from the queue.
 
@@ -1488,6 +1552,8 @@ def process_interaction_messages(
         interaction_step_shift: Amount to shift interaction step by
         tensorboard_logger: Logger for tracking progress
         shutdown_event: Event to signal shutdown
+        hil_metrics_config: HIL 指标配置（滑动窗口大小）
+        slide_state: 滑动窗口状态，用于论文风格的可视化
 
     Returns:
         dict | None: The last interaction message processed, or None if none were processed
@@ -1499,6 +1565,8 @@ def process_interaction_messages(
             message=message,
             interaction_step_shift=interaction_step_shift,
             tensorboard_logger=tensorboard_logger,
+            hil_metrics_config=hil_metrics_config,
+            slide_state=slide_state,
         )
 
     return last_message

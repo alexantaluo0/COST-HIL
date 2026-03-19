@@ -5,10 +5,10 @@
     "seed": 1000,
     "num_workers": 4,
     "batch_size": 256,
-    "steps": 100000,
+    "steps": 30000,
     "log_freq": 1,
     "save_checkpoint": true,
-    "save_freq": 5000,
+    "save_freq": 25000,
     "wandb": {
         "enable": true,
         "project": "hil-serl-panda-pick",
@@ -18,14 +18,14 @@
         "mode": "offline"
     },
     "dataset": {
-        "repo_id": "alexanta/sim_gamepad_dataset_test",
-        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_test",
+        "repo_id": "alexanta/sim_gamepad_dataset_eval",
+        "root": "E:/HIL-SERL/datasets/sim_gamepad_dataset_eval",
         "use_imagenet_stats": false
     },
     "policy": {
         "type": "sac",
         "n_obs_steps": 1,
-        "repo_id": "alexanta/policy_panda_pick_gamepad_test",
+        "repo_id": "alexanta/policy_panda_pick_gamepad_eval",
         "normalization_mapping": {
             "VISUAL": "MEAN_STD",
             "STATE": "MIN_MAX",
@@ -203,7 +203,7 @@
             "enabled": true,
             "cooldown_steps": 10,
             "penalty_window_steps": 10,
-            "switching_penalty": -0.002
+            "switching_penalty": -0.005
         }
     },
     "env": {
@@ -254,7 +254,7 @@
                 "gripper_penalty": -0.02
             },
             "reset": {
-                "control_time_s": 20.0,
+                "control_time_s": 10.0,
                 "reset_time_s": 2.0,
                 "fixed_reset_joint_positions": [
                     0.0,
@@ -293,6 +293,9 @@
             }
         }
     },
+    "hil_metrics": {
+        "slide_window_size": 20
+    },
     "intervention_scheduler": {
         "enabled": true,
         "uncertainty_threshold_high_start": 0.5,
@@ -311,7 +314,7 @@
         "min_intervention_weight": 0.1
     },
     "bis_optimization": {
-        "enabled": true,
+        "enabled": false,
         "per_alpha": 0.3,
         "per_beta_start": 0.7,
         "per_beta_end": 1.0,
