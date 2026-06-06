@@ -55,177 +55,167 @@ Experiment platform: Zhiyuan Elf G2 dexterous robot arm with 2 wrist RGB cameras
 
 ---
 
-## 2. 环境搭建（Windows版）
+## 2.Environment Setup on Windows
 
-### 2.1 创建 Conda 环境
+### 2.1 Create Conda Environment
 
 ```bash
 conda create -y -n lerobot python=3.10
 conda activate lerobot
 ```
 
-> **注意**：如果本地电脑禁用了 conda，可能需要特殊处理才能创建环境。
+> **Note**：Special configuration is required if conda is disabled on your local device.
 
-### 2.2 克隆项目
+
+### 2.2 Clone Repository
 
 ```bash
 git clone https://github.com/huggingface/lerobot.git
 cd lerobot
 ```
 
-### 2.3 安装依赖包
+### 2.3 Install Dependencies
 
 ```bash
 pip install -e ".[hilserl]"
 ```
 
-#### Windows 常见问题：placo-0.9.18.tar.gz 安装失败
+#### Fix for placo-0.9.18 Installation Failure on Windows
 
 如果在 Windows 上遇到 `placo-0.9.18.tar.gz` 安装失败的问题，解决步骤如下：
 
-1. **安装 Visual Studio Build Tools**（具体步骤可能因环境而异）
+1. **Install Visual Studio Build Tools in advance.**
 
-2. **使用 conda 安装预编译的 placo**：
+2. **Install precompiled placo via conda:**：
 ```bash
 conda install -y -c conda-forge placo=0.9.18
 ```
 
-3. **重新安装依赖**：
+3. **Reinstall project dependencies:**：
 ```bash
 pip install -e ".[hilserl]"
 ```
 
 ---
 
-## 3. 修改配置文件
+## 3. Configuration Modification
 
-官方提供的配置文件在运行时会出现问题，需要进行修改。
+Default official configuration files need customized adjustments before running.
 
-**官方配置参考**：[官方配置文件](https://huggingface.co/datasets/lerobot/config_examples/resolve/main/rl/gym_hil/env_config.json)
+**Official reference config:**：[Official reference config](https://huggingface.co/datasets/lerobot/config_examples/resolve/main/rl/gym_hil/env_config.json)
 
-### 3.1 `gym_hil_env.json` 配置说明
+### 3.1 `gym_hil_env.json` Parameters
 
-可能需要修改的参数：
+- `control_time_s`: Max episode duration in seconds
+- `repo_id`: Dataset repository ID on HuggingFace, set to null for local test
+- `root`: Local storage path for collected datasets
+- `num_episodes_to_record`: Total episodes to be recorded
+- `push_to_hub`: Toggle automatic dataset upload to HuggingFace Hub
+- `mode`: Available options: "record" for data collection, null for regular running
 
-- `control_time_s`：回合最大时长（秒）
-- `repo_id`：HuggingFace 数据集仓库 ID（格式：`username/dataset_name`）。测试时这种方式不太可行，可以设为 `null`
-- `root`：本地数据集保存路径
-- `num_episodes_to_record`：要录制的回合数
-- `push_to_hub`：是否自动上传到 HuggingFace Hub
-- `mode`：模式设置，可选值：`"record"`（录制模式）、`null`（仅运行）
 
-### 3.2 `train_gym_hil_env.json` 配置说明
+### 3.2 `train_gym_hil_env.json` Parameters
 
-可能需要修改的参数：
+Customize dataset path and hyperparameters for training：
 
-- 数据集路径
-- 训练相关参数
+Training & Evaluation Pipeline
 
 ---
 
-## 4. 训练与评测流程
+## 4. Collect Offline Demonstration Dataset
 
-### 4.1 录制离线数据集
+### 4.1 Collect Offline Demonstration Dataset
 
 ```bash
 cd E:\HIL-SERL\lerobot
 python -m lerobot.rl.gym_manipulator --config_path gym_hil_env.json
 ```
 
-#### 操作说明
+#### Operation Guide
 
-等待几秒后会出现仿真画面，操作步骤：
+The simulation window pops up after initialization：
 
-1. 会自动弹出干预窗口
-2. 按 **空格键** 切换到人类操作模式
+1. Human intervention panel loads automatically
+2. Press **Space** to switch into manual control mode
 
-**键盘控制说明**：
+**Keyboard Mapping**：
 
-| 按键 | 功能 |
+| Key | Function |
 |------|------|
-| **左 Shift** | 机械臂向上 |
-| **右 Shift** | 机械臂向下 |
-| **左 Ctrl** | 夹爪打开 |
-| **右 Ctrl** | 夹爪关闭 |
-| **↑ ↓ ← →** | 控制末端执行器在 x、y 平面内移动 |
-| **Enter** | 标记为成功 |
-| **Backspace** | 标记为失败 |
+| **Left Shift** | Move arm upward |
+| **Right Shift** | Move arm downward |
+| **Left Ctrl** | Open gripper |
+| **Right Ctrl** | Close gripper |
+| **↑ ↓ ← →** | Move end-effector on X-Y plane |
+| **Enter** | current episode as success |
+| **Backspace** | current episode as failure |
 
-抓住方块后，按右 Shift 抬起到一定高度会自动触发成功，结束一回合录制。
+
+An episode automatically succeeds when lifting the block to target height.
 
 ---
 
-### 4.2 运行 Learner 进程
+### 4.2 Start Learner Process
 
 ```bash
 cd E:\HIL-SERL\lerobot
 python -m lerobot.rl.learner --config_path train_gym_hil_env.json
 ```
 
-等待离线数据集加载完毕后，再运行 Actor 进程。
+Launch the Actor process after dataset loading completes.
 
 ---
 
-### 4.3 运行 Actor 进程
+### 4.3 Start Actor Process (New Terminal)
 
-在新的终端中运行：
 
 ```bash
 cd E:\HIL-SERL\lerobot
 python -m lerobot.rl.actor --config_path train_gym_hil_env.json
 ```
-
-运行后会出现仿真画面，初期机械臂会随机动作。按 **空格键** 进行人类干预操作。
-
-**训练特点**：前期人类干预较多，随着训练进行逐渐减少。
+Random actions appear in early training stage; press Space to enable manual correction. Human intervention frequency decreases gradually as policy converges.
 
 ---
 
-### 4.4 测试模型
+### 4.4 Evaluation
 
 ```bash
 cd E:\HIL-SERL\lerobot
 python -m lerobot.rl.actor --config_path eval_gym_hil_env.json
 ```
 
-**评测结果**：在 200 次抓取动作测试中，可达到 **99.5%** 的准确率。
+**Evaluation Result*：**99.5%** grasping success rate over **200** test episodes.
 
 ---
 
-## 5. 其他问题
+## 5. Common Troubleshooting
 
-### 5.1 Windows 缺少 Triton 编译器
+### 5.1 Missing Triton Compiler on Windows
 
-在 Windows 运行时会出现缺少 Triton 编译器的问题，代码会降级为 Eager 模式，这会影响训练速度。
+Triton is unavailable under Windows, the framework automatically switches to Eager execution with reduced training speed. Use Linux environment for full Triton acceleration.
 
-**建议**：如果在 Linux 上训练，可以继续使用 Triton 以获得更好的性能。
+### 5.2 Original Code Defects
 
-### 5.2 代码不完善问题
-
-复现过程中发现代码有很多不完善的地方，已在复现过程中进行了修改。建议环境搭建好之后，使用修改后的代码版本。
+Multiple bugs in upstream source code have been fixed in this repository version. Use our modified code after environment setup.
 
 ---
 
-## 配置文件示例
+## Config File List
 
-项目根目录下包含以下配置文件：
+- `gym_hil_env.json`：Data collection configuration
+- `train_gym_hil_env.json`：Training hyperparameter configuration
+- `eval_gym_hil_env.json`：Evaluation configuration
 
-- `gym_hil_env.json`：数据录制配置
-- `train_gym_hil_env.json`：训练配置
-- `eval_gym_hil_env.json`：评测配置
-
-请根据实际需求修改配置文件中的参数。
+Adjust corresponding parameters according to your experimental requirements.
 
 ---
 
-## 参考资源
+## Reference Links
 
-- **官方文档**：[HIL-SERL Simulation Guide](https://huggingface.co/docs/lerobot/hilserl_sim)
-- **配置示例**：[Official Config Examples](https://huggingface.co/datasets/lerobot/config_examples)
-- **飞书文档**：[HIL-SERL 复现文档](https://longcheer.feishu.cn/wiki/IRUrwrrgriFTxvkATGqcv2GKnwh)
+- **Official HIL-SERL Doc**：[HIL-SERL Simulation Guide](https://huggingface.co/docs/lerobot/hilserl_sim)
+- **Official Config Examples**：[Official Config Examples](https://huggingface.co/datasets/lerobot/config_examples)
 
 ---
 
-## 许可证
-
-本项目基于 [Apache 2.0 License](./LICENSE) 开源。
+## License
+This project is released under Apache 2.0 License.
