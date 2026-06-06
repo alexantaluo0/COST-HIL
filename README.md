@@ -2,7 +2,58 @@
 
 ## 1. 项目介绍
 
-本项目实现了 COST-HILE 论文代码
+# COST-HIL
+Official implementation of COST-HIL: Cost-Aware Human-in-the-Loop Reinforcement Learning for Real-World Dexterous Manipulation
+![Framework](./assets/framework.png)
+![Training_Curve](./assets/train_curve.png)
+
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)]
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange)]
+[![Real Robot Learning](https://img.shields.io/badge/Field-Robot%20RL-green)]
+[![MIT License](https://img.shields.io/badge/license-MIT-yellow)]
+
+## Overview
+Existing HIL-SERL relies on handcrafted fixed threshold rules for human intervention, uses equal-weight replay for all correction data, and ignores gripper frequent-switch jitter on physical robots, leading to excessive human cost, low sample efficiency and unstable hardware execution.
+
+**COST-HIL treats human intervention as a cost-controllable schedulable resource instead of an external auxiliary signal.** Based on the HIL-SERL backbone (offline demonstration initialization + online SAC fine-tune), we propose three core modules to jointly optimize task success rate, human labor cost and robot execution stability for real-world dexterous grasping.
+
+## Core Technical Improvements (Three Key Modules)
+### 1. Cost-Aware Adaptive Intervention Scheduler
+Formulate human intervention as a cost-aware optimal stopping problem under POMDP:
+1. Calculate policy surprisal to construct instantaneous uncertainty, apply EMA smoothing to get stable belief uncertainty $b_t$;
+2. Estimate no-intervention state value via multi-critic conservative evaluation, compute intervention benefit $B_t$;
+3. Trigger human takeover only when intervention benefit > predefined per-step human cost, dynamically increase threshold along training to reduce redundant manual operation;
+4. Embed human intervention penalty $\lambda_{int}<0$ into original reward: $r_t'=r_t+\lambda_{int}i_t+\lambda_{grip}c_t^{grip}$, endogenous cost optimization into RL objective.
+
+**Effect**: Human intervention rate reduced by 80% compared with HIL-SERL baseline.
+
+### 2. Informativeness & Reliability Joint Reweighted Replay Buffer
+Abandon uniform sampling for autonomous and human-corrected samples:
+1. **Informativeness**: Measured by absolute TD error, large TD means insufficiently learned high-value samples;
+2. **Reliability**: Derived from sigmoid normalized critic Q value to filter low-quality noisy human corrections;
+3. Combine two metrics to compute sample priority for prioritized experience replay;
+4. Dynamically adjust online/offline sample mixing ratio according to moving average training loss of two data sources.
+
+**Effect**: Improve utilization of high-quality human demonstration and suppress negative influence of invalid intervention data.
+
+### 3. Gripper Cooling & Switching Penalty Regularization
+Solve gripper frequent toggle jitter and hardware abrasion in physical grasping:
+1. Cooling window constraint: forbid continuous gripper state switching within fixed timestep window K;
+2. Add binary switching penalty item $c_t^{grip}=\mathbb{I}[g_t\neq g_{t-1}]$ to augmented reward to penalize meaningless frequent open/close.
+
+**Effect**: Reduce single episode runtime by 46.3% without sacrificing task success rate.
+
+## Experimental Results
+Experiment platform: Zhiyuan Elf G2 dexterous robot arm with 2 wrist RGB cameras + 1 head RGB camera, control frequency=10Hz.
+|Metric|HIL-SERL|COST-HIL|Relative Improvement|
+|:---|:---:|:---:|:---:|
+|Success Rate|80.7±2.1%|99.9±0.1%|+19.2%|
+|Total Training Time|54 min|21 min|-61.1%|
+|Intervention Rate|30%|6%|-80.0%|
+|Single Cycle Time|4.23s|2.27s|-46.3%|
+
+- Convergence speed: COST-HIL reaches 90% success rate within 7493 training steps, while HIL-SERL requires 21529 steps;
+- After sufficient training, COST-HIL’s human intervention gradually drops near zero, baseline still keeps ~15% intervention ratio.
 
 ---
 
@@ -87,7 +138,7 @@ python -m lerobot.rl.gym_manipulator --config_path gym_hil_env.json
 
 等待几秒后会出现仿真画面，操作步骤：
 
-1. 用鼠标点击一下仿真界面
+1. 会自动弹出干预窗口
 2. 按 **空格键** 切换到人类操作模式
 
 **键盘控制说明**：
@@ -132,30 +183,7 @@ python -m lerobot.rl.actor --config_path train_gym_hil_env.json
 
 ---
 
-### 4.4 人工干预标准操作规程（SOP）
-
-在实际实验中，人为干预的时机对收敛性能有显著影响。为确保训练效果，建议遵循以下标准操作流程：
-
-1. **初期全面干预**  
-   在前 3-5 个阶段进行全面干预，每次都完成任务，提供稳定的初期指导。
-
-2. **严重偏差后不干预探索**  
-   一旦观察到严重偏差（例如机器人末端执行器朝无关方向探索），不要干预，让机器人探索直至该回合超时。
-
-3. **反复严重偏差后应尽早干预**  
-   如果在同一位置/状态下两次观察到严重偏差，则下次出现偏差时，应在偏差首次发生的最早时间点进行干预。
-
-4. **连续失败后完全接管**  
-   如果机器人连续五次未能完成任务，下一次操作由人工从头开始完全介入并完成任务，提供完整的人工演示。
-
-5. **驯化抓手动作**  
-   当夹爪反复关闭、抓住目标后又放下时，夹爪移动到目标位置后立刻人工接管，重点驯化抓手动作，使其一次性抓住目标。
-
-> **注意**：虽然严格遵守 SOP 对操作人员来说不切实际，但它仍可作为高效在线训练的宝贵指导方针。
-
----
-
-### 4.5 测试模型
+### 4.4 测试模型
 
 ```bash
 cd E:\HIL-SERL\lerobot
