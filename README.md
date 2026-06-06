@@ -1,5 +1,3 @@
-## 1. 项目介绍
-
 # COST-HIL
 Official implementation of COST-HIL: Cost-Aware Human-in-the-Loop Reinforcement Learning for Real-World Dexterous Manipulation
 ![Framework](./assets/framework.png)
